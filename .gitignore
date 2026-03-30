@@ -1,5 +1,19 @@
-data/
-*.db
-*.csv
+# Python
 __pycache__/
+*.pyc
+
+# Environment
 .env
+
+# Data (ignore contents, not folders)
+data/raw/*
+data/artifacts/*
+
+# Keep folder structure
+!data/raw/.gitkeep
+!data/proto/.gitkeep
+!data/processed/.gitkeep
+!data/artifacts/.gitkeep
+
+# Databases
+*.db
