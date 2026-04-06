@@ -7,6 +7,8 @@ __pycache__/
 
 # Data (ignore contents, not folders)
 data/raw/*
+data/processed/*
+data/proto/*
 data/artifacts/*
 
 # Keep folder structure

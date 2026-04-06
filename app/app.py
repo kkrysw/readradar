@@ -4,10 +4,19 @@ Streamlit prototype using UCSD Book Graph (fantasy/paranormal subset)
 Data source: https://sites.google.com/eng.ucsd.edu/ucsdbookgraph/home
 """
 
+import sys
+from pathlib import Path
+
+# ensure repo root is on sys.path so src.* modules resolve
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-from pathlib import Path
+
+import src.search as search
+import src.recommend as recommend
+import src.controversy as controversy
 
 # ── page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
@@ -394,139 +403,27 @@ def book_card(row, show_score=None, score_label=None):
 # ── thematic search ────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def build_tfidf():
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    books, _, _ = load_data()  # safe: load_data is cache_data, already sanitized
-
-    def shelf_text(shelves):
-        # guard against None, NaN, scalars, and numpy arrays
-        if shelves is None:
-            return ""
-        try:
-            items = list(shelves)  # works for lists, np arrays, and other iterables
-        except TypeError:
-            return ""
-        if not items:
-            return ""
-        names = []
-        for s in items:
-            if isinstance(s, dict):
-                names.append(s.get("name", "").replace("-", " "))
-        return " ".join(names)
-
-    corpus = (
-        books["description"].fillna("") + " " +
-        books["title"].fillna("") + " " +
-        books["popular_shelves"].apply(shelf_text)
-    )
-    vec = TfidfVectorizer(stop_words="english", max_features=15000, ngram_range=(1, 2))
-    mat = vec.fit_transform(corpus)
-    return vec, mat
-
-
-def thematic_search(query, books, vec, mat, top_k=10):
-    from sklearn.metrics.pairwise import cosine_similarity
-    q_vec = vec.transform([query])
-    sims = cosine_similarity(q_vec, mat).flatten()
-    top_idx = np.argsort(sims)[::-1][:top_k]
-    results = books.iloc[top_idx].copy()
-    results["_score"] = sims[top_idx]
-    return results[results["_score"] > 0]
+    books, _, _ = load_data()
+    return search.build_tfidf(books)
 
 
 # ── recommendations ────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def build_rec_model():
-    from scipy.sparse import csr_matrix
-    from sklearn.decomposition import TruncatedSVD
-    _, interactions, _ = load_data()  # safe: already sanitized by load_data
-
-    # encode ids
-    users = interactions["user_id"].astype("category")
-    books_cat = interactions["book_id"].astype("category")
-    ratings = interactions["rating"].fillna(0)
-
-    mat = csr_matrix(
-        (ratings.values, (users.cat.codes.values, books_cat.cat.codes.values))
-    )
-    svd = TruncatedSVD(n_components=50, random_state=42)
-    user_factors = svd.fit_transform(mat)
-    item_factors = svd.components_.T  # shape: (n_books, n_components)
-
-    return svd, item_factors, books_cat.cat.categories.tolist()
+    _, interactions, _ = load_data()
+    return recommend.build_rec_model(interactions)
 
 
-def recommend_from_books(liked_ids, books_df, interactions, top_k=8):
+def recommend_from_books(liked_ids, books_df, top_k=8):
     try:
-        svd, item_factors, book_cats = build_rec_model()
+        item_factors, book_cats = build_rec_model()
     except Exception:
-        # fallback: popularity-based
         return books_df[~books_df["book_id"].isin(liked_ids)].nlargest(top_k, "ratings_count")
-
-    # build pseudo-user vector by averaging item factors of liked books
-    idxs = [book_cats.index(bid) for bid in liked_ids if bid in book_cats]
-    if not idxs:
-        return books_df[~books_df["book_id"].isin(liked_ids)].nlargest(top_k, "ratings_count")
-
-    pseudo_user = item_factors[idxs].mean(axis=0)
-    scores = item_factors @ pseudo_user
-    top_idx = np.argsort(scores)[::-1]
-    ranked_book_ids = [book_cats[i] for i in top_idx]
-    ranked_book_ids = [b for b in ranked_book_ids if b not in liked_ids][:top_k * 3]
-
-    result = books_df[books_df["book_id"].isin(ranked_book_ids)].copy()
-    id_to_score = {b: scores[book_cats.index(b)] for b in ranked_book_ids if b in book_cats}
-    result["_rec_score"] = result["book_id"].map(id_to_score)
-    return result.nlargest(top_k, "_rec_score")
+    return recommend.recommend_from_books(liked_ids, books_df, item_factors, book_cats, top_k)
 
 
 # ── controversy scoring ────────────────────────────────────────────────────────
-def compute_controversy(book_id, interactions):
-    rows = interactions[interactions["book_id"] == book_id]["rating"].dropna()
-    if len(rows) < 5:
-        return None, None, None
-    mean_ = rows.mean()
-    std_ = rows.std()
-    count_ = len(rows)
-    # higher std + more ratings → more controversial
-    raw = std_ * np.log1p(count_)
-    # normalise to 0-100 using empirical max ~3.0
-    score = min(100, raw / 3.0 * 100)
-    return score, mean_, rows.value_counts().sort_index()
-
-
-def extract_pros_cons(book_id, reviews, n=4):
-    """Simple sentiment split using polarity word lists."""
-    pos_words = {
-        "love", "loved", "amazing", "beautiful", "wonderful", "brilliant",
-        "fantastic", "incredible", "perfect", "excellent", "great", "best",
-        "masterpiece", "compelling", "captivating", "engaging", "stunning",
-        "magical", "powerful", "moving", "enchanting", "riveting", "outstanding",
-    }
-    neg_words = {
-        "hate", "hated", "boring", "awful", "terrible", "worst", "disappointing",
-        "bad", "poor", "weak", "slow", "dull", "predictable", "annoying",
-        "frustrating", "confusing", "overrated", "tedious", "ridiculous", "cheesy",
-        "stupid", "bland", "mediocre", "cliché",
-    }
-
-    book_reviews = reviews[reviews["book_id"] == book_id]["review_text"].dropna()
-    pros, cons = [], []
-
-    for review in book_reviews:
-        sentences = [s.strip() for s in str(review).replace("!", ".").split(".") if len(s.strip()) > 30]
-        for sent in sentences:
-            lower = sent.lower()
-            words = set(lower.split())
-            pos_hits = len(words & pos_words)
-            neg_hits = len(words & neg_words)
-            if pos_hits > neg_hits and len(pros) < n * 3:
-                pros.append((pos_hits, sent[:180]))
-            elif neg_hits > pos_hits and len(cons) < n * 3:
-                cons.append((neg_hits, sent[:180]))
-
-    pros = [s for _, s in sorted(pros, reverse=True)[:n]]
-    cons = [s for _, s in sorted(cons, reverse=True)[:n]]
-    return pros, cons
+# Delegated to src.controversy — see that module for implementation details.
 
 def make_book_label(row):
     year = row.get("publication_year", "")
@@ -621,7 +518,7 @@ if st.session_state.active_tab == "🔍 Thematic Search":
         st.session_state.thematic_searched = True
         if query.strip():
             with st.spinner("Searching…"):
-                st.session_state.thematic_results = thematic_search(query.strip(), books, vec, mat)
+                st.session_state.thematic_results = search.thematic_search(query.strip(), books, vec, mat)
         else:
             st.session_state.thematic_results = None
 
@@ -661,7 +558,7 @@ elif st.session_state.active_tab == "📚 Recommendations":
     )
 
     if search_liked.strip():
-        hits = thematic_search(search_liked.strip(), books, vec, mat, top_k=5)
+        hits = search.thematic_search(search_liked.strip(), books, vec, mat, top_k=5)
         for _, row in hits.iterrows():
             bid = str(row["book_id"])
             cols = st.columns([6, 1])
@@ -687,7 +584,7 @@ elif st.session_state.active_tab == "📚 Recommendations":
         if st.button("Get Recommendations →", key="get_recs"):
             with st.spinner("Finding books you'll love…"):
                 liked_ids = list(st.session_state.liked_books.keys())
-                recs = recommend_from_books(liked_ids, books, interactions)
+                recs = recommend_from_books(liked_ids, books)
 
             st.markdown('<div class="section-label">Recommended for you</div>', unsafe_allow_html=True)
             for _, row in recs.iterrows():
@@ -718,7 +615,7 @@ elif st.session_state.active_tab == "⚡ Controversy":
         st.session_state.controversy_searched = True
         if c_query.strip():
             with st.spinner("Searching…"):
-                hits = thematic_search(c_query.strip(), books, vec, mat, top_k=8)
+                hits = search.thematic_search(c_query.strip(), books, vec, mat, top_k=8)
             if hits.empty:
                 st.session_state.controversy_hits = None
                 st.session_state.controversy_selected_label = None
@@ -756,8 +653,8 @@ elif st.session_state.active_tab == "⚡ Controversy":
             chosen_row = hits[hits["label"] == selected_label].iloc[0]
             chosen_id = str(chosen_row["book_id"])
 
-            score, mean_rating, rating_dist = compute_controversy(chosen_id, interactions)
-            pros, cons = extract_pros_cons(chosen_id, reviews)
+            score, mean_rating, rating_dist = controversy.compute_controversy(chosen_id, interactions)
+            pros, cons = controversy.extract_pros_cons(chosen_id, reviews)
 
             st.markdown("---")
 
