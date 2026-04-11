@@ -164,3 +164,6 @@ Wrapped gzip file reads with an 8 MB `io.BufferedReader` to reduce I/O syscall o
 
 **Fix 8 — Separation of `data/proto/` and `data/processed/`:**
 A `--proto` run previously wrote Stage 1 output to `data/processed/` as a side effect. Now Stage 1 streams books into memory without writing to disk when `--proto` is set, carves the top-5,000 subset in memory, and writes directly to `data/proto/`. `data/processed/` is never touched during a proto run.
+
+### Sampling update — `src/sample_books.py`
+Built a shared 5,000-book sample for search, recommendations, and controversy analysis using only books present in all three processed tables (`books`, `interactions`, `reviews`). Applied hard support filters (`review_count >= 30`, `interaction_count >= 30`), then ranked by `ratings_count` and `text_reviews_count` with `book_id` as a deterministic tie-breaker. Current run: 38,052 in the three-way intersection, 7,934 eligible after filters, and 5,000 selected. Artifacts written: `sampled_book_ids.json`, `sampling_summary.json`, and `sampled_books_preview.parquet`.
