@@ -170,6 +170,26 @@ Built a shared 5,000-book sample for search, recommendations, and controversy an
 
 ---
 
+### Recommendation Pipeline (`src/recommendation_step1_dataprocessing.py`, `src/recommendation_step2_algorithm.py`, `src/recommendation_step3_ui.py`)
+Built a three-stage recommendation pipeline on top of the 5,000-book sampled catalog.
+
+**Stage 1 — Content Embedding & Dimensionality Reduction (`recommendation_step1_dataprocessing.py`)**
+Loads the 5,000 sampled books and their top 10 most helpful reviews. Combines title, description, and reviews into a single text per book, then generates 384-dimensional embeddings using `all-MiniLM-L6-v2` (sentence-transformers). Applies TruncatedSVD to reduce to 16 latent factors for recommendation, and t-SNE to reduce to 3D coordinates for visualization. Raw embeddings are saved for downstream reuse so the model never needs to run twice.
+
+Artifacts written to `data/artifacts/`:
+- `book_latent_factors.parquet` — 16D latent factors per book
+- `read_universe_3d.parquet` — 3D (x, y, z) coordinates per book
+- `book_embeddings.npy` — raw 384D embeddings
+- `book_embeddings_ids.json` — matching book ID order
+- `svd_model.pkl` — fitted SVD model for future query transformation
+
+**Stage 2 — Recommendation Algorithm (`recommendation_step2_algorithm.py`)**
+Takes an ordered list of liked book IDs (oldest → newest) and builds a weighted user persona vector. Weights increase linearly from 1/(2n) to 2/n so the most recently added book has 4x the influence of the oldest. Computes cosine similarity between the persona and all 5,000 book vectors, filters out already-read books, and returns the top 5 recommendations sorted by similarity then average rating.
+
+**Stage 3 — Streamlit UI Prototype (`recommendation_step3_ui.py`)**
+Single-page Streamlit app. Shows a reading list at the top (books with title, rating, and inline remove button), five recommendations below (with description and match percentage, plus an Add button to move a book into the list), and an interactive 3D Plotly scatter plot at the bottom. Recommendations refresh automatically on every add or remove. When the reading list is empty, shows the top 5 highest-rated books as a default. Books in the reading list are highlighted in orange in the 3D universe.
+
+
 ## Final Controversy Pipeline and Outputs
 
 The final controversy workflow uses deterministic preprocessing plus structured LLM synthesis to produce a stable, shareable book-level reception artifact. The core idea is to build a consistent per-book evidence bundle from sampled reviews, combine it with lightweight objective rating statistics, and then use the LLM to generate concise controversy/reception summaries rather than full aspect-by-aspect ABSA.
@@ -186,9 +206,6 @@ The final controversy workflow uses deterministic preprocessing plus structured 
 - Computes objective rating-based statistics from `interactions.parquet`.
 - Merges title, rating stats, and sampled reviews into the final LLM input parquet.
 
-Writes:
-- `book_llm_input.parquet`
-- `book_llm_input_summary.json`
 
 **2. `src/controversy_run_llm.py` (full inference run)**
 - Reads one row per book from the prep parquet.
@@ -206,7 +223,7 @@ Writes:
 - Keeps only final useful columns.
 - Writes a clean final parquet plus a compact verification summary JSON.
 
-### Final deliverables
+### Final deliverable
 
 **`data/artifacts/controversy_final.parquet`**  
 Final clean controversy artifact for downstream app and teammate use.
@@ -227,3 +244,6 @@ Small validation summary confirming:
 - exact ID-set match with the sampled list,
 - non-empty `overall_judgment`,
 - non-empty `top_tags`.
+=======
+
+
