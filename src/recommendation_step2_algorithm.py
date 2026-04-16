@@ -1,12 +1,12 @@
 """
 recommendation_step2_algorithm.py — ReadRadar Recommendation Engine
 Builds a weighted user persona from a list of liked book IDs using
-precomputed SVD latent factors, then recommends similar unread books
-from the 5,000 sampled catalog.
+precomputed 384D embeddings, then recommends similar unread books
+from the 5,000 sampled catalog using cosine similarity.
 
 Stages:
-  1. Load Artifacts  — Load book_latent_factors.parquet & books.parquet
-  2. Build Persona   — Weighted average of latent factors (recency-weighted)
+  1. Load Artifacts  — Load rec_embeddings.npy & books.parquet
+  2. Build Persona   — Weighted average of 384D embeddings (recency-weighted)
   3. Score Catalog   — Cosine similarity between persona and all book vectors
   4. Filter & Rank   — Remove already-read books, sort by similarity then rating
 
@@ -23,6 +23,7 @@ Dependencies:
   pip install pandas pyarrow numpy scikit-learn
 """
 
+import json
 import logging
 from pathlib import Path
 
@@ -36,12 +37,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 PROCESSED_DIR = Path("data/processed")
 ARTIFACTS_DIR = Path("data/artifacts")
 
-IN_FACTORS = ARTIFACTS_DIR / "book_latent_factors.parquet"
-IN_BOOKS   = PROCESSED_DIR / "books.parquet"
+IN_EMBEDDINGS = ARTIFACTS_DIR / "rec_embeddings.npy"
+IN_BOOK_IDS   = ARTIFACTS_DIR / "rec_embeddings_ids.json"
+IN_BOOKS      = PROCESSED_DIR / "books.parquet"
 
-TOP_N = 5  # Number of books to recommend
-
-FACTOR_COLS = [f"factor_{i}" for i in range(16)]  # Must match N_COMPONENTS in step1
+TOP_N = 5
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -59,22 +59,28 @@ log = logging.getLogger("rec_step2")
 # ---------------------------------------------------------------------------
 
 def load_artifacts():
-    """Load precomputed latent factors and book metadata."""
-    log.info("Loading latent factors and book metadata...")
+    """Load precomputed 384D embeddings and book metadata."""
+    log.info("Loading embeddings and book metadata...")
 
-    factors_df = pd.read_parquet(IN_FACTORS)
+    embeddings = np.load(IN_EMBEDDINGS)
+
+    with open(IN_BOOK_IDS, "r") as f:
+        book_ids = json.load(f)
 
     books_df = pd.read_parquet(
         IN_BOOKS,
         columns=["book_id", "title", "average_rating", "ratings_count"]
     )
+    books_df["book_id"] = books_df["book_id"].astype(str)
+    books_df["average_rating"] = pd.to_numeric(books_df["average_rating"], errors="coerce")
+    books_df["ratings_count"] = pd.to_numeric(books_df["ratings_count"], errors="coerce").fillna(0).astype(int)
 
-    # Keep only sampled books (those that have latent factors)
-    sampled_ids = set(factors_df["book_id"].astype(str))
-    books_df = books_df[books_df["book_id"].astype(str).isin(sampled_ids)].copy()
+    # Keep only sampled books
+    sampled_ids = set(book_ids)
+    books_df = books_df[books_df["book_id"].isin(sampled_ids)].copy()
 
-    log.info(f"Loaded {len(factors_df)} book vectors, {len(books_df)} book metadata rows.")
-    return factors_df, books_df
+    log.info(f"Loaded embeddings shape: {embeddings.shape}, {len(books_df)} books.")
+    return embeddings, book_ids, books_df
 
 
 def compute_recency_weights(n: int) -> np.ndarray:
@@ -82,8 +88,7 @@ def compute_recency_weights(n: int) -> np.ndarray:
     Compute normalized recency weights for n books.
 
     Weight increases linearly from 1/(2n) for the oldest book (index 0)
-    to 2/n for the newest book (index n-1). Weights are then normalized
-    to sum to 1.
+    to 2/n for the newest book (index n-1). Normalized to sum to 1.
 
     Args:
         n: Number of books in the input list.
@@ -100,44 +105,40 @@ def compute_recency_weights(n: int) -> np.ndarray:
     return weights / weights.sum()
 
 
-def build_persona(liked_book_ids: list, factors_df: pd.DataFrame) -> np.ndarray:
+def build_persona(liked_book_ids: list, embeddings: np.ndarray, book_ids: list) -> np.ndarray:
     """
     Build a user persona vector as a recency-weighted average of liked books'
-    latent factors.
+    384D embeddings.
 
     Args:
         liked_book_ids: List of book IDs ordered from oldest to newest interest.
-        factors_df:     DataFrame with columns [book_id, factor_0, ..., factor_k].
+        embeddings:     2D array of shape (N, 384).
+        book_ids:       List of book IDs matching the embedding rows.
 
     Returns:
-        1D numpy array of shape (n_factors,) representing the user persona.
+        1D numpy array of shape (384,) representing the user persona.
     """
     log.info(f"Building persona from {len(liked_book_ids)} books...")
 
     liked_book_ids = [str(bid) for bid in liked_book_ids]
-    factors_df = factors_df.copy()
-    factors_df["book_id"] = factors_df["book_id"].astype(str)
+    id_to_idx = {bid: i for i, bid in enumerate(book_ids)}
 
-    # Filter to only books that exist in our catalog
-    matched = factors_df[factors_df["book_id"].isin(liked_book_ids)].copy()
+    matched_ids = []
+    matched_vecs = []
+    for bid in liked_book_ids:
+        if bid in id_to_idx:
+            matched_ids.append(bid)
+            matched_vecs.append(embeddings[id_to_idx[bid]])
+        else:
+            log.warning(f"Book ID {bid} not found in embeddings, skipping.")
 
-    # Preserve the input order (oldest → newest)
-    matched["_order"] = matched["book_id"].map(
-        {bid: i for i, bid in enumerate(liked_book_ids)}
-    )
-    matched = matched.sort_values("_order").reset_index(drop=True)
-
-    missing = set(liked_book_ids) - set(matched["book_id"])
-    if missing:
-        log.warning(f"{len(missing)} book(s) not found in catalog and will be skipped: {missing}")
-
-    n = len(matched)
+    n = len(matched_vecs)
     if n == 0:
         raise ValueError("None of the provided book IDs were found in the sampled catalog.")
 
     weights = compute_recency_weights(n)
-    vectors = matched[FACTOR_COLS].values
-    persona = (weights[:, np.newaxis] * vectors).sum(axis=0)
+    vectors = np.stack(matched_vecs)                          # shape: (n, 384)
+    persona = (weights[:, np.newaxis] * vectors).sum(axis=0)  # shape: (384,)
 
     log.info("Persona vector computed.")
     return persona
@@ -145,7 +146,8 @@ def build_persona(liked_book_ids: list, factors_df: pd.DataFrame) -> np.ndarray:
 
 def recommend(
     liked_book_ids: list,
-    factors_df: pd.DataFrame,
+    embeddings: np.ndarray,
+    book_ids: list,
     books_df: pd.DataFrame,
     top_n: int = TOP_N,
 ) -> pd.DataFrame:
@@ -156,39 +158,39 @@ def recommend(
     Args:
         liked_book_ids: Ordered list of book IDs the user likes (oldest first,
                         newest last). Updated on every add/remove action.
-        factors_df:     Precomputed latent factor DataFrame.
+        embeddings:     Precomputed 384D embedding matrix, shape (N, 384).
+        book_ids:       List of book IDs matching embedding rows.
         books_df:       Book metadata DataFrame.
         top_n:          Number of recommendations to return (default: 5).
 
     Returns:
-        DataFrame with columns [rank, book_id, title, average_rating,
-        similarity] sorted by similarity desc, then average_rating desc.
+        DataFrame with columns [rank, book_id, title, average_rating, similarity].
     """
     if not liked_book_ids:
         log.warning("Empty book list provided, returning empty recommendations.")
         return pd.DataFrame(columns=["rank", "book_id", "title", "average_rating", "similarity"])
 
     # 1. Build persona
-    persona = build_persona(liked_book_ids, factors_df)
+    persona = build_persona(liked_book_ids, embeddings, book_ids)
 
-    # 2. Compute cosine similarity against all books in catalog
-    all_vectors = factors_df[FACTOR_COLS].values
-    persona_vec = persona.reshape(1, -1)
-    similarities = cosine_similarity(persona_vec, all_vectors)[0]
+    # 2. Cosine similarity against all embeddings
+    persona_vec = persona.reshape(1, -1)                          # shape: (1, 384)
+    similarities = cosine_similarity(persona_vec, embeddings)[0]  # shape: (N,)
 
-    # 3. Attach scores
-    scored = factors_df[["book_id", "title"]].copy()
-    scored["similarity"] = similarities
+    # 3. Build scored DataFrame aligned to book_ids order
+    scored = pd.DataFrame({
+        "book_id":    book_ids,
+        "similarity": similarities,
+    })
+    scored["book_id"] = scored["book_id"].astype(str)
 
     # 4. Filter out already-read books
     read_ids = set(str(bid) for bid in liked_book_ids)
-    scored = scored[~scored["book_id"].astype(str).isin(read_ids)].copy()
+    scored = scored[~scored["book_id"].isin(read_ids)].copy()
 
-    # 5. Merge with metadata for rating info
-    books_df = books_df.copy()
-    books_df["book_id"] = books_df["book_id"].astype(str)
+    # 5. Merge with metadata
     scored = scored.merge(
-        books_df[["book_id", "average_rating", "ratings_count"]],
+        books_df[["book_id", "title", "average_rating", "ratings_count"]],
         on="book_id",
         how="left"
     )
@@ -218,26 +220,25 @@ def _print_section(title: str):
     print('=' * 60)
 
 
-def run_tests(factors_df: pd.DataFrame, books_df: pd.DataFrame):
+def run_tests(embeddings, book_ids, books_df):
     """
     Simple functional tests to verify the recommendation pipeline.
 
-    Test 1 — Single book:        persona should equal that book's vector exactly.
-    Test 2 — Add a book:         recommendations should change after adding a book.
-    Test 3 — Remove a book:      recommendations should change after removing a book.
-    Test 4 — Recency weights:    newest book should have higher weight than oldest.
-    Test 5 — No duplicates:      liked books should never appear in recommendations.
-    Test 6 — Empty list:         should return empty DataFrame gracefully.
-    Test 7 — Invalid ID:         unknown IDs should be skipped with a warning.
+    Test 1 — Single book:     returns 5 results, liked book not in results.
+    Test 2 — Add a book:      recommendations change after adding a book.
+    Test 3 — Remove a book:   recommendations change after removing a book.
+    Test 4 — Recency weights: newest book has higher weight than oldest.
+    Test 5 — No duplicates:   liked books never appear in recommendations.
+    Test 6 — Empty list:      returns empty DataFrame gracefully.
+    Test 7 — Invalid ID:      unknown IDs are skipped with a warning.
     """
-    # Use real book IDs from the sampled catalog for testing
-    all_ids = factors_df["book_id"].astype(str).tolist()
+    all_ids = book_ids
     book_a, book_b, book_c, book_d = all_ids[0], all_ids[1], all_ids[2], all_ids[3]
 
     passed = 0
     failed = 0
 
-    def check(name: str, condition: bool, detail: str = ""):
+    def check(name, condition, detail=""):
         nonlocal passed, failed
         if condition:
             print(f"  ✅ PASS  {name}")
@@ -247,28 +248,20 @@ def run_tests(factors_df: pd.DataFrame, books_df: pd.DataFrame):
             failed += 1
 
     _print_section("Test 1: Single book persona")
-    result_1 = recommend([book_a], factors_df, books_df)
+    result_1 = recommend([book_a], embeddings, book_ids, books_df)
     print(result_1.to_string(index=False))
     check("Returns 5 results", len(result_1) == 5)
     check("Liked book not in results", book_a not in result_1["book_id"].values)
 
     _print_section("Test 2: Adding a book changes recommendations")
-    result_before = recommend([book_a], factors_df, books_df)
-    result_after  = recommend([book_a, book_b], factors_df, books_df)
-    recs_before = set(result_before["book_id"].astype(str))
-    recs_after  = set(result_after["book_id"].astype(str))
-    print(f"  Before (1 book): {recs_before}")
-    print(f"  After  (2 books): {recs_after}")
-    check("Recommendations changed after adding a book", recs_before != recs_after)
+    result_before = recommend([book_a], embeddings, book_ids, books_df)
+    result_after  = recommend([book_a, book_b], embeddings, book_ids, books_df)
+    check("Recommendations changed", set(result_before["book_id"]) != set(result_after["book_id"]))
 
     _print_section("Test 3: Removing a book changes recommendations")
-    result_three = recommend([book_a, book_b, book_c], factors_df, books_df)
-    result_two   = recommend([book_a, book_b], factors_df, books_df)
-    recs_three = set(result_three["book_id"].astype(str))
-    recs_two   = set(result_two["book_id"].astype(str))
-    print(f"  With 3 books: {recs_three}")
-    print(f"  After remove: {recs_two}")
-    check("Recommendations changed after removing a book", recs_three != recs_two)
+    result_three = recommend([book_a, book_b, book_c], embeddings, book_ids, books_df)
+    result_two   = recommend([book_a, book_b], embeddings, book_ids, books_df)
+    check("Recommendations changed", set(result_three["book_id"]) != set(result_two["book_id"]))
 
     _print_section("Test 4: Recency weights")
     weights_3 = compute_recency_weights(3)
@@ -279,17 +272,17 @@ def run_tests(factors_df: pd.DataFrame, books_df: pd.DataFrame):
 
     _print_section("Test 5: No liked books in recommendations")
     liked = [book_a, book_b, book_c]
-    result_5 = recommend(liked, factors_df, books_df)
+    result_5 = recommend(liked, embeddings, book_ids, books_df)
     overlap = set(str(b) for b in liked) & set(result_5["book_id"].astype(str))
-    check("No liked books appear in results", len(overlap) == 0, f"Overlap: {overlap}")
+    check("No liked books in results", len(overlap) == 0, f"Overlap: {overlap}")
 
     _print_section("Test 6: Empty book list")
-    result_6 = recommend([], factors_df, books_df)
+    result_6 = recommend([], embeddings, book_ids, books_df)
     check("Returns empty DataFrame", len(result_6) == 0)
 
     _print_section("Test 7: Invalid book ID is skipped")
     try:
-        result_7 = recommend([book_a, "INVALID_ID_999999"], factors_df, books_df)
+        result_7 = recommend([book_a, "INVALID_ID_999999"], embeddings, book_ids, books_df)
         check("Runs without crash", True)
         check("Still returns results", len(result_7) > 0)
     except Exception as e:
@@ -299,8 +292,8 @@ def run_tests(factors_df: pd.DataFrame, books_df: pd.DataFrame):
 
 
 def main():
-    factors_df, books_df = load_artifacts()
-    run_tests(factors_df, books_df)
+    embeddings, book_ids, books_df = load_artifacts()
+    run_tests(embeddings, book_ids, books_df)
 
 
 if __name__ == "__main__":

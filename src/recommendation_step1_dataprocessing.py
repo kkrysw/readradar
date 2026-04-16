@@ -1,25 +1,22 @@
 """
 recommendation_step1_dataprocessing.py — ReadRadar Content Embedding Pipeline
 Processes a sampled subset of 5,000 books, combining their descriptions
-and top user reviews. Generates text embeddings using all-MiniLM-L6-v2,
-reduces dimensionality via TruncatedSVD to create dense latent factors for
-recommendation, and applies t-SNE to generate a 3D spatial map for visualization.
+and top user reviews. Generates text embeddings using all-MiniLM-L6-v2 and
+applies t-SNE to generate a 3D spatial map for visualization.
 
 Stages:
   1. Data Loading     — Read sampled IDs, filter books.parquet & reviews.parquet
   2. Text Aggregation — Combine book description + top N most helpful reviews
   3. Embedding        — Generate 384D embeddings using all-MiniLM-L6-v2
-  4. Save Raw         — Save raw embeddings to artifacts/book_embeddings.npy
-  5. SVD Reduction    — Reduce 384D embeddings to 16 latent factors
-  6. t-SNE Reduction  — Reduce 384D embeddings to 3D (x, y, z) coordinates
-  7. Artifact Saving  — Save latent factors & 3D coordinates to artifacts/
+  4. Save Embeddings  — Save 384D embeddings to artifacts/rec_embeddings.npy
+  5. t-SNE Reduction  — Reduce 384D embeddings to 3D (x, y, z) coordinates
+  6. Artifact Saving  — Save embeddings & 3D coordinates to artifacts/
 
 Run:
   python src/recommendation_step1_dataprocessing.py
 
 Thresholds & Hyperparameters:
   MAX_REVIEWS_PER_BOOK = 10  (Top 10 reviews sorted by n_votes)
-  N_COMPONENTS         = 16  (SVD latent factors)
   EMBEDDING_BATCH_SIZE = 16
   TSNE_PERPLEXITY      = 40
 
@@ -27,23 +24,19 @@ Dependencies:
   pip install pandas pyarrow scikit-learn sentence-transformers torch tqdm numpy
 
 Outputs:
-  data/artifacts/book_latent_factors.parquet  — 16D latent factors for recommendation
-  data/artifacts/read_universe_3d.parquet     — 3D coordinates for visualization
-  data/artifacts/book_embeddings.npy          — raw 384D embeddings (for reuse)
-  data/artifacts/book_embeddings_ids.json     — matching book IDs for embeddings
-  data/artifacts/svd_model.pkl                — fitted SVD model (for future queries)
+  data/artifacts/rec_embeddings.npy          — raw 384D embeddings for recommendation
+  data/artifacts/rec_embeddings_ids.json     — matching book IDs for embeddings
+  data/artifacts/read_universe_3d.parquet    — 3D coordinates for visualization
 """
 
 import json
 import logging
-import pickle
 import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
-from sklearn.decomposition import TruncatedSVD
 from sklearn.manifold import TSNE
 
 # ---------------------------------------------------------------------------
@@ -56,15 +49,12 @@ IN_BOOKS       = PROCESSED_DIR / "books.parquet"
 IN_REVIEWS     = PROCESSED_DIR / "reviews.parquet"
 IN_SAMPLED_IDS = ARTIFACTS_DIR / "sampled_book_ids.json"
 
-OUT_FACTORS    = ARTIFACTS_DIR / "book_latent_factors.parquet"
+OUT_EMBEDDINGS = ARTIFACTS_DIR / "rec_embeddings.npy"
+OUT_BOOK_IDS   = ARTIFACTS_DIR / "rec_embeddings_ids.json"
 OUT_UNIVERSE   = ARTIFACTS_DIR / "read_universe_3d.parquet"
-OUT_EMBEDDINGS = ARTIFACTS_DIR / "book_embeddings.npy"
-OUT_BOOK_IDS   = ARTIFACTS_DIR / "book_embeddings_ids.json"
-OUT_SVD_MODEL  = ARTIFACTS_DIR / "svd_model.pkl"
 
 # Hyperparameters
 MAX_REVIEWS_PER_BOOK = 10
-N_COMPONENTS         = 16
 EMBEDDING_BATCH_SIZE = 16
 MODEL_NAME           = "all-MiniLM-L6-v2"
 TSNE_PERPLEXITY      = 40
@@ -154,15 +144,12 @@ def generate_embeddings(merged_df):
     return embeddings
 
 
-def save_raw_embeddings(embeddings, merged_df):
-    """
-    Save raw embeddings and their corresponding book IDs to disk.
-    Allows downstream pipelines to skip re-embedding entirely.
-    """
-    log.info("=== Stage 4: Saving Raw Embeddings ===")
+def save_embeddings(embeddings, merged_df):
+    """Save 384D embeddings and matching book IDs to disk."""
+    log.info("=== Stage 4: Saving Embeddings ===")
 
     np.save(OUT_EMBEDDINGS, embeddings)
-    log.info(f"Saved raw embeddings to {OUT_EMBEDDINGS}  shape={embeddings.shape}")
+    log.info(f"Saved embeddings to {OUT_EMBEDDINGS}  shape={embeddings.shape}")
 
     book_ids = merged_df["book_id"].astype(str).tolist()
     with open(OUT_BOOK_IDS, "w") as f:
@@ -170,26 +157,9 @@ def save_raw_embeddings(embeddings, merged_df):
     log.info(f"Saved matching book IDs to {OUT_BOOK_IDS}")
 
 
-def perform_svd(embeddings):
-    """Reduce 384D embeddings to N_COMPONENTS latent factors via TruncatedSVD."""
-    log.info(f"=== Stage 5: SVD Reduction → {N_COMPONENTS} factors ===")
-
-    svd = TruncatedSVD(n_components=N_COMPONENTS, random_state=42)
-    reduced = svd.fit_transform(embeddings)
-
-    explained = svd.explained_variance_ratio_.sum()
-    log.info(f"Explained variance by top {N_COMPONENTS} factors: {explained:.2%}")
-
-    with open(OUT_SVD_MODEL, "wb") as f:
-        pickle.dump(svd, f)
-    log.info(f"Saved SVD model to {OUT_SVD_MODEL}")
-
-    return reduced
-
-
 def perform_tsne(embeddings):
     """Reduce 384D embeddings to 3D coordinates via t-SNE for visualization."""
-    log.info("=== Stage 6: t-SNE 3D Reduction ===")
+    log.info("=== Stage 5: t-SNE 3D Reduction ===")
     log.info("Note: t-SNE may take a few minutes to converge...")
 
     tsne = TSNE(
@@ -218,25 +188,16 @@ def main():
     # 2. Aggregate text
     merged_df = aggregate_text(books_df, reviews_df)
 
-    # 3. Embed (once, reused by both SVD and t-SNE)
+    # 3. Generate 384D embeddings
     embeddings = generate_embeddings(merged_df)
 
-    # 4. Save raw embeddings for any future downstream reuse
-    save_raw_embeddings(embeddings, merged_df)
+    # 4. Save embeddings for downstream recommendation use
+    save_embeddings(embeddings, merged_df)
 
-    # 5. SVD → latent factors for recommendation
-    latent_factors = perform_svd(embeddings)
-
-    factor_cols = [f"factor_{i}" for i in range(N_COMPONENTS)]
-    factors_df = pd.DataFrame(latent_factors, columns=factor_cols)
-    factors_df.insert(0, "book_id", merged_df["book_id"].values)
-    factors_df.insert(1, "title",   merged_df["title"].values)
-    factors_df.to_parquet(OUT_FACTORS, index=False)
-    log.info(f"Saved latent factors to {OUT_FACTORS}")
-
-    # 6. t-SNE → 3D coordinates for visualization
+    # 5. t-SNE → 3D coordinates for visualization
     coords_3d = perform_tsne(embeddings)
 
+    log.info("=== Stage 6: Saving Artifacts ===")
     universe_df = pd.DataFrame({
         "book_id": merged_df["book_id"].values,
         "title":   merged_df["title"].values,

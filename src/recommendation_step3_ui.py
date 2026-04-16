@@ -105,7 +105,7 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
     margin-bottom: 1.2rem;
 }
 
-/* book card (recommendations) */
+/* book card */
 .book-card {
     background: #ffffff;
     border: 1px solid #e0d5c5;
@@ -198,7 +198,7 @@ PROCESSED_DIR = Path("data/processed")
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_all():
-    factors_df, books_df = load_artifacts()
+    embeddings, book_ids, books_df = load_artifacts()
     books_df["book_id"] = books_df["book_id"].astype(str)
     books_df["average_rating"] = pd.to_numeric(books_df["average_rating"], errors="coerce")
     books_df["ratings_count"] = (
@@ -225,7 +225,7 @@ def load_all():
                   "⭐ 3.5 - 3.9"  if r >= 3.5 else
                   "⭐ < 3.5"))
     )
-    return factors_df, books_df, full_books, universe_df
+    return embeddings, book_ids, books_df, full_books, universe_df
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@ def stars(rating):
     return "★" * full + "☆" * (5 - full)
 
 
-def refresh_recs(factors_df, books_df):
+def refresh_recs(embeddings, book_ids, books_df):
     liked_ids = list(st.session_state.liked_books.keys())
     if not liked_ids:
         top5 = (
@@ -250,7 +250,7 @@ def refresh_recs(factors_df, books_df):
         st.session_state.recs = top5
         st.session_state.recs_mode = "top_rated"
     else:
-        st.session_state.recs = recommend(liked_ids, factors_df, books_df, top_n=5)
+        st.session_state.recs = recommend(liked_ids, embeddings, book_ids, books_df, top_n=5)
         st.session_state.recs_mode = "personalized"
 
 
@@ -268,10 +268,10 @@ if "recs" not in st.session_state:
 # ---------------------------------------------------------------------------
 # Load data
 # ---------------------------------------------------------------------------
-factors_df, books_df, full_books, universe_df = load_all()
+embeddings, book_ids, books_df, full_books, universe_df = load_all()
 
 if st.session_state.recs.empty:
-    refresh_recs(factors_df, books_df)
+    refresh_recs(embeddings, book_ids, books_df)
 
 
 # ---------------------------------------------------------------------------
@@ -310,13 +310,13 @@ if liked_items:
             st.markdown("<div style='height:0.6rem;'></div>", unsafe_allow_html=True)
             if st.button("✕", key=f"rm_{bid}"):
                 del st.session_state.liked_books[bid]
-                refresh_recs(factors_df, books_df)
+                refresh_recs(embeddings, book_ids, books_df)
                 st.rerun()
 else:
     st.markdown(
         "<div style='color:#b0a090;font-style:italic;font-size:0.88rem;"
         "text-align:center;padding:1.5rem 0;'>"
-        "Your reading list is empty.</div>",
+        "Your reading list is empty. Add books from the recommendations below.</div>",
         unsafe_allow_html=True,
     )
 
@@ -363,7 +363,7 @@ for _, row in st.session_state.recs.iterrows():
         else:
             if st.button("+ Add", key=f"like_{bid}"):
                 st.session_state.liked_books[bid] = str(row["title"])
-                refresh_recs(factors_df, books_df)
+                refresh_recs(embeddings, book_ids, books_df)
                 st.rerun()
 
 
