@@ -1,7 +1,7 @@
 """
-search.py - Search and nearest-neighbor retrieval logic for ReadRadar.
+search.py - Semantic search and nearest-neighbor retrieval logic for ReadRadar.
 
-Loads precomputed TF-IDF features and supports:
+Loads precomputed embeddings and supports:
     1. thematic_search(query)
     2. similar_books(book_id)
 
@@ -10,68 +10,72 @@ Uses cosine similarity with a custom top-k retrieval implementation.
 
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
+import torch.nn.functional as F
+from sentence_transformers import SentenceTransformer
 
 
 ARTIFACTS_DIR = Path("data/artifacts")
 
 SEARCH_BOOKS_PATH = ARTIFACTS_DIR / "search_books.parquet"
-TFIDF_MATRIX_PATH = ARTIFACTS_DIR / "book_tfidf.npy"
-VECTORIZER_PATH = ARTIFACTS_DIR / "tfidf_vectorizer.joblib"
+EMBEDDINGS_PATH = ARTIFACTS_DIR / "book_embeddings.npy"
+
+MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
+EMBED_DIM = 128
 
 
 def _load_artifacts():
-    """Load books table, TF-IDF matrix, and fitted vectorizer."""
+    """Load books table and embedding matrix."""
     if not SEARCH_BOOKS_PATH.exists():
         raise FileNotFoundError(
             f"Missing {SEARCH_BOOKS_PATH}. Run python scripts/build_features.py first."
         )
-    if not TFIDF_MATRIX_PATH.exists():
+    if not EMBEDDINGS_PATH.exists():
         raise FileNotFoundError(
-            f"Missing {TFIDF_MATRIX_PATH}. Run python scripts/build_features.py first."
-        )
-    if not VECTORIZER_PATH.exists():
-        raise FileNotFoundError(
-            f"Missing {VECTORIZER_PATH}. Run python scripts/build_features.py first."
+            f"Missing {EMBEDDINGS_PATH}. Run python scripts/build_features.py first."
         )
 
     books_df = pd.read_parquet(SEARCH_BOOKS_PATH)
-    tfidf_matrix = np.load(TFIDF_MATRIX_PATH)
-    vectorizer = joblib.load(VECTORIZER_PATH)
+    embeddings = np.load(EMBEDDINGS_PATH)
 
-    return books_df, tfidf_matrix, vectorizer
-
-
-def _normalize_rows(matrix):
-    """L2-normalize each row of a matrix."""
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    return matrix / norms
+    return books_df, embeddings
 
 
-def _normalize_vector(vector):
-    """L2-normalize a 1D vector."""
-    norm = np.linalg.norm(vector)
-    if norm == 0:
-        return vector
-    return vector / norm
+def _get_model():
+    """Load embedding model."""
+    return SentenceTransformer(MODEL_NAME)
+
+
+def _encode_query(model, query):
+    """
+    Encode query using Nomic retrieval prefix.
+    Apply layer norm, truncate dimension, and L2 normalize.
+    """
+    prefixed = ["search_query: " + str(query).strip()]
+
+    embedding = model.encode(
+        prefixed,
+        convert_to_tensor=True,
+        show_progress_bar=False,
+    )
+
+    embedding = F.layer_norm(embedding, normalized_shape=(embedding.shape[1],))
+    embedding = embedding[:, :EMBED_DIM]
+    embedding = F.normalize(embedding, p=2, dim=1)
+
+    return embedding.cpu().numpy()[0].astype(np.float32)
 
 
 def _cosine_top_k(query_vec, doc_matrix, top_k=10):
     """
     Return indices and cosine scores of the top-k nearest neighbors.
-
-    Assumes query_vec is 1D and doc_matrix is 2D.
+    Assumes vectors are already normalized.
     """
     if len(doc_matrix) == 0:
         return np.array([], dtype=int), np.array([], dtype=np.float32)
 
     top_k = min(top_k, len(doc_matrix))
-
-    query_vec = _normalize_vector(query_vec)
-    doc_matrix = _normalize_rows(doc_matrix)
 
     scores = doc_matrix @ query_vec
 
@@ -83,14 +87,16 @@ def _cosine_top_k(query_vec, doc_matrix, top_k=10):
 
 def thematic_search(query, top_k=10):
     """Return top-k books matching a free-text query."""
-    books_df, tfidf_matrix, vectorizer = _load_artifacts()
+    books_df, embeddings = _load_artifacts()
 
     query = str(query).strip()
     if query == "":
         return books_df.head(0).copy()
 
-    query_vec = vectorizer.transform([query]).toarray()[0].astype(np.float32)
-    indices, scores = _cosine_top_k(query_vec, tfidf_matrix, top_k=top_k)
+    model = _get_model()
+    query_vec = _encode_query(model, query)
+
+    indices, scores = _cosine_top_k(query_vec, embeddings, top_k=top_k)
 
     result_df = books_df.iloc[indices].copy().reset_index(drop=True)
     result_df["score"] = scores
@@ -111,16 +117,16 @@ def thematic_search(query, top_k=10):
 
 def similar_books(book_id, top_k=10):
     """Return top-k books most similar to the given book_id."""
-    books_df, tfidf_matrix, _ = _load_artifacts()
+    books_df, embeddings = _load_artifacts()
 
     matches = books_df.index[books_df["book_id"].astype(str) == str(book_id)].tolist()
     if len(matches) == 0:
         raise ValueError(f"book_id {book_id} not found")
 
     row_idx = matches[0]
-    query_vec = tfidf_matrix[row_idx]
+    query_vec = embeddings[row_idx]
 
-    indices, scores = _cosine_top_k(query_vec, tfidf_matrix, top_k=top_k + 1)
+    indices, scores = _cosine_top_k(query_vec, embeddings, top_k=top_k + 1)
 
     result_df = books_df.iloc[indices].copy()
     result_df["score"] = scores
@@ -142,16 +148,14 @@ def similar_books(book_id, top_k=10):
     return result_df[cols]
 
 
-def main():
-    """Run a small search demo."""
-    print("Sample thematic search:")
-    print(thematic_search("fantasy magic wizard school", top_k=5))
-
-    print("\nSample similar-books search:")
-    books_df, _, _ = _load_artifacts()
-    sample_book_id = books_df.iloc[0]["book_id"]
-    print(similar_books(sample_book_id, top_k=5))
-
 if __name__ == "__main__":
-    main()
- 
+    print("=== Testing semantic search system ===")
+
+    print("\n--- Thematic search: fantasy magic ---")
+    results = thematic_search("fantasy magic", top_k=5)
+    print(results[["title", "score"]])
+
+    print("\n--- Similar books test ---")
+    sample_book_id = results.iloc[0]["book_id"]
+    similar = similar_books(sample_book_id, top_k=5)
+    print(similar[["title", "score"]])
