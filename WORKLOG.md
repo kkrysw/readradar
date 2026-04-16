@@ -236,14 +236,5 @@ Columns:
 - `overall_judgment` — short LLM-written synthesis of strongest supported praise and criticism in sampled reviews.
 - `top_tags` — compact LLM-generated summary tags for UI display.
 
-**`data/artifacts/controversy_final_summary.json`**  
-Small validation summary confirming:
-- expected 5,000 books,
-- final row count,
-- unique `book_id` values,
-- exact ID-set match with the sampled list,
-- non-empty `overall_judgment`,
-- non-empty `top_tags`.
-=======
 
 
