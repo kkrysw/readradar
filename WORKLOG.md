@@ -171,7 +171,6 @@ Built a shared 5,000-book sample for search, recommendations, and controversy an
 ---
 
 ### Recommendation Pipeline (`src/recommendation_step1_dataprocessing.py`, `src/recommendation_step2_algorithm.py`, `src/recommendation_step3_ui.py`)
-
 Built a three-stage recommendation pipeline on top of the 5,000-book sampled catalog.
 
 **Stage 1 — Content Embedding & Dimensionality Reduction (`recommendation_step1_dataprocessing.py`)**
@@ -189,3 +188,53 @@ Takes an ordered list of liked book IDs (oldest → newest) and builds a weighte
 
 **Stage 3 — Streamlit UI Prototype (`recommendation_step3_ui.py`)**
 Single-page Streamlit app. Shows a reading list at the top (books with title, rating, and inline remove button), five recommendations below (with description and match percentage, plus an Add button to move a book into the list), and an interactive 3D Plotly scatter plot at the bottom. Recommendations refresh automatically on every add or remove. When the reading list is empty, shows the top 5 highest-rated books as a default. Books in the reading list are highlighted in orange in the 3D universe.
+
+
+## Final Controversy Pipeline and Outputs
+
+The final controversy workflow uses deterministic preprocessing plus structured LLM synthesis to produce a stable, shareable book-level reception artifact. The core idea is to build a consistent per-book evidence bundle from sampled reviews, combine it with lightweight objective rating statistics, and then use the LLM to generate concise controversy/reception summaries rather than full aspect-by-aspect ABSA.
+
+### Final official scripts
+
+**1. `src/controversy_prep.py` (deterministic prep pipeline)**
+- Loads the shared 5,000-book sampled list.
+- Filters `reviews.parquet` to sampled books only.
+- Keeps only reviews with `rating > 0` and non-empty review text.
+- Removes duplicates.
+- Applies stricter English filtering and minimum word-count filtering.
+- Performs per-book balanced sampling of 12 reviews using a 4/4/4 negative-neutral-positive target, with waterfall top-up when one band is sparse.
+- Computes objective rating-based statistics from `interactions.parquet`.
+- Merges title, rating stats, and sampled reviews into the final LLM input parquet.
+
+
+**2. `src/controversy_run_llm.py` (full inference run)**
+- Reads one row per book from the prep parquet.
+- Sends title, rating statistics, and sampled review block to Claude.
+- Requests structured output fields: `book_id`, `positive_aspects`, `negative_aspects`, `overall_judgment`, `top_tags`.
+- Supports safe resume/checkpointing.
+- Avoids duplicate processing of already completed books.
+- Retries transient API failures with backoff.
+- Logs per-book failures separately.
+- Rebuilds the run parquet from the append-only JSONL success log.
+
+**3. `src/controversy_finalize.py` (final artifact extraction)**
+- Reads the sampled 5,000-book ID list and full run parquet.
+- Verifies the final `book_id` set exactly matches the shared sampled list.
+- Keeps only final useful columns.
+- Writes a clean final parquet plus a compact verification summary JSON.
+
+### Final deliverable
+
+**`data/artifacts/controversy_final.parquet`**  
+Final clean controversy artifact for downstream app and teammate use.
+
+Columns:
+- `book_id` — shared key used to join with other modules.
+- `title` — book title for display.
+- `average_rating` — average rating computed from broader interaction data.
+- `rating_std_dev` — standard deviation of ratings as a simple disagreement/spread signal.
+- `overall_judgment` — short LLM-written synthesis of strongest supported praise and criticism in sampled reviews.
+- `top_tags` — compact LLM-generated summary tags for UI display.
+
+
+
