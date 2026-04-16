@@ -6,7 +6,7 @@ Builds a searchable books table and embedding matrix from:
 
 Outputs:
     data/artifacts/search_books.parquet
-    data/artifacts/book_embeddings.npy
+    data/artifacts/search_embeddings.npy
 """
 
 from pathlib import Path
@@ -21,12 +21,11 @@ BOOKS_PATH = Path("data/proto/books.parquet")
 ARTIFACTS_DIR = Path("data/artifacts")
 
 SEARCH_BOOKS_PATH = ARTIFACTS_DIR / "search_books.parquet"
-EMBEDDINGS_PATH = ARTIFACTS_DIR / "book_embeddings.npy"
+EMBEDDINGS_PATH = ARTIFACTS_DIR / "search_embeddings.npy"
 
 MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
-MAX_BOOKS = 2000
-BATCH_SIZE = 4
-EMBED_DIM = 128
+BATCH_SIZE = 8
+EMBED_DIM = 384
 
 
 def _clean_text(value):
@@ -97,10 +96,6 @@ def build_search_artifacts():
     books_df = books_df.drop_duplicates(subset=["book_id"]).reset_index(drop=True)
 
     print(f"Books after cleaning: {len(books_df)}")
-
-    if len(books_df) > MAX_BOOKS:
-        books_df = books_df.sample(n=MAX_BOOKS, random_state=42).reset_index(drop=True)
-
     print(f"Books used for embeddings: {len(books_df)}")
 
     model = SentenceTransformer(MODEL_NAME, device="cpu")

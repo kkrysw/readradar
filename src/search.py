@@ -19,10 +19,10 @@ from sentence_transformers import SentenceTransformer
 ARTIFACTS_DIR = Path("data/artifacts")
 
 SEARCH_BOOKS_PATH = ARTIFACTS_DIR / "search_books.parquet"
-EMBEDDINGS_PATH = ARTIFACTS_DIR / "book_embeddings.npy"
+EMBEDDINGS_PATH = ARTIFACTS_DIR / "search_embeddings.npy"
 
 MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
-EMBED_DIM = 128
+EMBED_DIM = 384
 
 
 def _load_artifacts():
