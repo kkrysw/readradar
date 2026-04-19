@@ -10,6 +10,7 @@ Outputs:
 """
 
 from pathlib import Path
+import json
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ ARTIFACTS_DIR = Path("data/artifacts")
 
 SEARCH_BOOKS_PATH = ARTIFACTS_DIR / "search_books.parquet"
 EMBEDDINGS_PATH = ARTIFACTS_DIR / "search_embeddings.npy"
+SAMPLED_IDS_PATH = ARTIFACTS_DIR / "sampled_book_ids.json"
 
 MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
 BATCH_SIZE = 8
@@ -74,6 +76,9 @@ def build_search_artifacts():
     if not BOOKS_PATH.exists():
         raise FileNotFoundError(f"Missing file: {BOOKS_PATH}")
 
+    if not SAMPLED_IDS_PATH.exists():
+        raise FileNotFoundError(f"Missing file: {SAMPLED_IDS_PATH}")
+
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
     books_df = pd.read_parquet(BOOKS_PATH)
@@ -95,8 +100,13 @@ def build_search_artifacts():
     books_df = books_df[books_df["search_text"] != ""].copy()
     books_df = books_df.drop_duplicates(subset=["book_id"]).reset_index(drop=True)
 
-    print(f"Books after cleaning: {len(books_df)}")
-    print(f"Books used for embeddings: {len(books_df)}")
+    with open(SAMPLED_IDS_PATH, "r") as f:
+        sampled_ids = set(json.load(f))
+
+    books_df["book_id"] = books_df["book_id"].astype(str)
+    books_df = books_df[books_df["book_id"].isin(sampled_ids)].reset_index(drop=True)
+
+    print(f"Books after filtering to sampled ids: {len(books_df)}")
 
     model = SentenceTransformer(MODEL_NAME, device="cpu")
     embeddings = _encode_documents(model, books_df["search_text"].tolist())
