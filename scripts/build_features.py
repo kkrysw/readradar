@@ -2,7 +2,7 @@
 build_features.py - Precompute semantic embeddings for ReadRadar search.
 
 Builds a searchable books table and embedding matrix from:
-    data/proto/books.parquet
+    data/processed/books.parquet
 
 Outputs:
     data/artifacts/search_books.parquet
@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
 
 
-BOOKS_PATH = Path("data/proto/books.parquet")
+BOOKS_PATH = Path("data/processed/books.parquet")
 ARTIFACTS_DIR = Path("data/artifacts")
 
 SEARCH_BOOKS_PATH = ARTIFACTS_DIR / "search_books.parquet"
