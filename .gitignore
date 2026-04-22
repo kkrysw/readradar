@@ -2,18 +2,29 @@
 __pycache__/
 *.pyc
 
+# Virtualenvs
+.venv/
+venv/
+
 # Environment
 .env
 
 # Data (ignore contents, not folders)
 data/raw/*
+data/processed/*
+data/proto/*
 data/artifacts/*
 
-# Keep folder structure
+# Keep folder structure + the expensive final controversy artifact
 !data/raw/.gitkeep
 !data/proto/.gitkeep
 !data/processed/.gitkeep
 !data/artifacts/.gitkeep
+!data/artifacts/controversy_final.parquet
 
 # Databases
 *.db
+
+# macOS
+.DS_Store
+**/.DS_Store

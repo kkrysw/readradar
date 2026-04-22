@@ -1,7 +1,12 @@
 streamlit
 pandas
 numpy
-scikit-learn
 pyarrow
-scipy
-pytest
+torch
+sentence-transformers
+tqdm
+anthropic
+python-dotenv
+langid
+orjson
+polars
