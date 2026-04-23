@@ -338,43 +338,7 @@ button[data-testid="stFormSubmitButton"]:hover { background: var(--accent-2) !im
     background: #eadfce;
 }
 
-/* ─── favorites ────────────────────────────────────────────────────────── */
-.fav-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.7rem 0.9rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    margin-bottom: 0.5rem;
-    transition: border-color .15s;
-}
-.fav-row:hover { border-color: var(--border-2); }
-.fav-row .fav-title {
-    font-family: 'Playfair Display', serif;
-    font-size: 0.98rem;
-    font-weight: 600;
-    color: var(--ink);
-}
-.fav-row .fav-meta {
-    font-size: 0.72rem;
-    color: var(--muted);
-    margin-top: 0.15rem;
-}
-.fav-order {
-    display: inline-block;
-    width: 22px; height: 22px;
-    border-radius: 50%;
-    background: var(--surface-2);
-    color: var(--muted);
-    text-align: center;
-    line-height: 22px;
-    font-size: 0.72rem;
-    font-weight: 600;
-    margin-right: 0.7rem;
-}
-
+/* ─── empty state ──────────────────────────────────────────────────────── */
 .empty-state {
     background: var(--surface);
     border: 1px dashed var(--border-2);

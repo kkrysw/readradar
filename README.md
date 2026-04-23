@@ -9,10 +9,11 @@ pip install -r requirements.txt
 streamlit run app/app.py
 ```
 
-The app has two pages:
+The app has three pages:
 
-1. **Thematic Search** — semantic search over the 5,000 sampled books. Each result card shows cover, rating, relevance score, top controversy tags, and a description preview. Clicking *Details* opens a clean detail modal with metadata, the controversy summary (`top_tags` + `overall_judgment`), and the full description. *+ Favorite* adds the book to the reading list.
-2. **Favorites & Recommendations** — the reading list is displayed in insertion order (oldest → newest). The bottom of the page shows top-N recommendations. Newer favorites weigh more. With no favorites yet, the app shows top-rated picks instead.
+1. **Thematic Search** — semantic search over the 5,000 sampled books. Each result card shows cover, rating, relevance score, top controversy tags, and a description preview. Clicking *Details* opens a detail modal with metadata, the controversy summary (`top_tags` + `overall_judgment`), and the full description. *+ Favorite* adds the book to the saved list.
+2. **Favorites** — every saved book shown as a first-class card in insertion order (oldest → newest). Each card has the same *Details* modal access as search results and a *Remove* action for removing the book from favorites. This is the only page where favorites are managed.
+3. **Recommendations** — top-N recommendations computed from the favorites list. Newer favorites weigh more (recency-weighted persona, see below). With no favorites yet, the page shows top-rated picks as a starting point.
 
 ## Core algorithm (explicitly implemented)
 

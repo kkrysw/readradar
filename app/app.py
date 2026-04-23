@@ -61,8 +61,9 @@ BOOKS_PATH          = PROCESSED_DIR / "books.parquet"
 REQUIRED_PATHS = [UI_CACHE_PATH, REC_EMBEDDINGS_PATH, REC_IDS_PATH, BOOKS_PATH]
 
 TABS = {
-    "search": "🔍 Thematic Search",
-    "recs":   "📚 Favorites & Recommendations",
+    "search":    "🔍 Thematic Search",
+    "favorites": "📖 Favorites",
+    "recs":      "✨ Recommendations",
 }
 
 DETAIL_COLUMNS = [
@@ -233,12 +234,32 @@ def enrich_with_details(results_df: pd.DataFrame, ui_books: pd.DataFrame) -> pd.
 def clear_modal() -> None:
     """Reset the detail-modal state. Called on nav/tab/page/search transitions."""
     st.session_state.modal_book_id = None
+    st.session_state.modal_source = None
 
 
 def _on_tab_change() -> None:
     """Radio on_change: sync active_tab and close any open modal."""
     st.session_state.active_tab = st.session_state.nav_tab
     clear_modal()
+
+
+def build_favorites_df() -> pd.DataFrame:
+    """
+    Return the current favorite books as a DataFrame with full detail columns,
+    in insertion order (oldest → newest) with a 1-indexed `_fav_order` column.
+    Drives both the Favorites page cards and modal lookups originating there.
+    """
+    liked_ids = list(st.session_state.liked_books.keys())
+    if not liked_ids:
+        cols = [c for c in DETAIL_COLUMNS if c in books.columns] + ["_fav_order"]
+        return pd.DataFrame(columns=cols)
+    liked_set = {str(b) for b in liked_ids}
+    order_map = {str(b): i + 1 for i, b in enumerate(liked_ids)}
+    fav = books[books["book_id"].astype(str).isin(liked_set)].copy()
+    fav["book_id"] = fav["book_id"].astype(str)
+    fav["_fav_order"] = fav["book_id"].map(order_map)
+    fav = fav.sort_values("_fav_order").reset_index(drop=True)
+    return fav
 
 
 # ─── recommendation ────────────────────────────────────────────────────────
@@ -286,10 +307,14 @@ def book_card(row: pd.Series, source: str) -> None:
         if score <= 1:
             score *= 100
         metric_html = f'<span class="bc-score">Relevance · {score:.0f}</span>'
-    elif source == "rec":
+    elif source == "recs":
         sim = row.get("similarity")
         if sim is not None and not (isinstance(sim, float) and pd.isna(sim)):
             metric_html = f'<span class="bc-score">Match · {float(sim):.0%}</span>'
+    elif source == "favorites":
+        order = row.get("_fav_order")
+        if order is not None and not (isinstance(order, float) and pd.isna(order)):
+            metric_html = f'<span class="bc-score">#{int(order)}</span>'
 
     desc = str(row.get("description", "") or "").strip()
     desc_preview = desc[:240] + "…" if len(desc) > 240 else desc
@@ -340,34 +365,44 @@ def book_card(row: pd.Series, source: str) -> None:
     with col_actions:
         if st.button("Details", key=f"open_{source}_{bid}", type="secondary"):
             st.session_state.modal_book_id = bid
+            st.session_state.modal_source = source
             st.rerun()
 
-        if bid not in st.session_state.liked_books:
-            if st.button("+ Favorite", key=f"add_{source}_{bid}", type="primary"):
-                # Clear any stale modal before reruns so a previously-opened
-                # detail dialog (dismissed via the browser X) does not resurface.
+        if source == "favorites":
+            if st.button("Remove", key=f"rm_{source}_{bid}", type="secondary"):
                 clear_modal()
-                st.session_state.liked_books[bid] = title
+                st.session_state.liked_books.pop(bid, None)
                 refresh_recs(rec_embeddings, rec_book_ids, rec_books_df, books)
                 st.rerun()
         else:
-            st.markdown(
-                "<div style='text-align:center;font-size:0.78rem;color:var(--accent);"
-                "letter-spacing:0.08em;text-transform:uppercase;margin-top:0.5rem;'>"
-                "✓ In favorites</div>",
-                unsafe_allow_html=True,
-            )
+            if bid not in st.session_state.liked_books:
+                if st.button("+ Favorite", key=f"add_{source}_{bid}", type="primary"):
+                    # Clear any stale modal before reruns so a previously-opened
+                    # detail dialog (dismissed via the browser X) does not resurface.
+                    clear_modal()
+                    st.session_state.liked_books[bid] = title
+                    refresh_recs(rec_embeddings, rec_book_ids, rec_books_df, books)
+                    st.rerun()
+            else:
+                st.markdown(
+                    "<div style='text-align:center;font-size:0.78rem;color:var(--accent);"
+                    "letter-spacing:0.08em;text-transform:uppercase;margin-top:0.5rem;'>"
+                    "✓ In favorites</div>",
+                    unsafe_allow_html=True,
+                )
 
 
 # ─── detail modal ──────────────────────────────────────────────────────────
 @st.dialog("Book Details", width="large")
 def show_modal(book_id: str) -> None:
     """Render the detail view for a single book."""
-    results = (
-        st.session_state.recs
-        if st.session_state.active_tab == "recs"
-        else st.session_state.thematic_results
-    )
+    modal_source = st.session_state.get("modal_source") or st.session_state.active_tab
+    if modal_source == "recs":
+        results = st.session_state.recs
+    elif modal_source == "favorites":
+        results = st.session_state.get("favorites_df")
+    else:
+        results = st.session_state.thematic_results
     if results is None or results.empty:
         clear_modal()
         st.rerun()
@@ -393,7 +428,12 @@ def show_modal(book_id: str) -> None:
         raw_score = 0.0
     if raw_score <= 1:
         raw_score *= 100
-    metric_label = "Match" if st.session_state.active_tab == "recs" else "Relevance"
+    if modal_source == "recs":
+        metric_label = "Match"
+    elif modal_source == "favorites":
+        metric_label = ""  # no score on favorites
+    else:
+        metric_label = "Relevance"
 
     col_cover, col_body = st.columns([1, 2.4], gap="large")
 
@@ -423,7 +463,7 @@ def show_modal(book_id: str) -> None:
             sub_parts.append(f'<span>{avg:.2f}</span>')
         if ratings_count:
             sub_parts.append(f'<span>{ratings_count:,} ratings</span>')
-        if raw_score > 0:
+        if raw_score > 0 and metric_label:
             sub_parts.append(f'<span class="bc-score">{metric_label} · {raw_score:.0f}</span>')
         sub_line = '<span class="dot">·</span>'.join(sub_parts)
         st.markdown(f'<div class="dm-sub">{sub_line}</div>', unsafe_allow_html=True)
@@ -492,10 +532,12 @@ def init_session_state() -> None:
         "search_page":        1,
         "results_per_page":   10,
         "modal_book_id":      None,
+        "modal_source":       None,  # "search" | "favorites" | "recs"
         "thematic_query":     "",
         "thematic_results":   None,
         "thematic_searched":  False,
         "liked_books":        {},  # insertion order = recency (newest last)
+        "favorites_df":       None,
         "recs":               pd.DataFrame(),
         "recs_mode":          "top_rated",
     }
@@ -651,63 +693,56 @@ if st.session_state.active_tab == "search":
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PAGE 2 — FAVORITES + RECOMMENDATIONS
+# PAGE 2 — FAVORITES
 # ═══════════════════════════════════════════════════════════════════════════
-elif st.session_state.active_tab == "recs":
-    st.markdown('<div class="section-title">Your reading list</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="section-label">Ordered oldest → newest. Later favorites weigh more in recommendations.</div>',
-        unsafe_allow_html=True,
-    )
+elif st.session_state.active_tab == "favorites":
+    st.markdown('<div class="section-title">Your favorites</div>', unsafe_allow_html=True)
 
-    liked_items = list(st.session_state.liked_books.items())
-    if liked_items:
-        for idx, (bid, title) in enumerate(liked_items, start=1):
-            row_data = rec_books_df[rec_books_df["book_id"] == bid]
-            avg = float(row_data["average_rating"].values[0]) if not row_data.empty else 0.0
-            col_info, col_btn = st.columns([12, 1], vertical_alignment="center")
-            with col_info:
-                st.markdown(
-                    f"""
-<div class="fav-row">
-    <div style="display:flex;align-items:center;">
-        <span class="fav-order">{idx}</span>
-        <div>
-            <div class="fav-title">{html.escape(title)}</div>
-            <div class="fav-meta"><span class="bc-stars">{stars(avg)}</span> &nbsp;{avg:.2f}</div>
-        </div>
-    </div>
-</div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            with col_btn:
-                if st.button("✕", key=f"rm_{bid}", help="Remove from favorites"):
-                    clear_modal()
-                    del st.session_state.liked_books[bid]
-                    refresh_recs(rec_embeddings, rec_book_ids, rec_books_df, books)
-                    st.rerun()
-    else:
+    favorites_df = build_favorites_df()
+    st.session_state.favorites_df = favorites_df  # expose to modal lookups
+
+    if favorites_df.empty:
         st.markdown(
             """
 <div class="empty-state">
     <div class="es-icon">📖</div>
-    <div class="es-title">Your reading list is empty</div>
-    <div class="es-body">Add books from the search page to build your personal recommendations.</div>
+    <div class="es-title">No favorites yet</div>
+    <div class="es-body">Open the Thematic Search page and save any book you like — it will appear here.</div>
 </div>
             """,
             unsafe_allow_html=True,
         )
-
-    st.markdown('<div class="section-title">Recommended for you</div>', unsafe_allow_html=True)
-    if st.session_state.recs_mode == "top_rated":
+    else:
+        n = len(favorites_df)
         st.markdown(
-            '<div class="section-label">Showing top-rated picks · add favorites for personalized recommendations</div>',
+            f'<div class="section-label">{n} saved · ordered oldest → newest · newer favorites weigh more in recommendations</div>',
+            unsafe_allow_html=True,
+        )
+        for _, row in favorites_df.iterrows():
+            book_card(row, source="favorites")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PAGE 3 — RECOMMENDATIONS
+# ═══════════════════════════════════════════════════════════════════════════
+elif st.session_state.active_tab == "recs":
+    st.markdown('<div class="section-title">Recommended for you</div>', unsafe_allow_html=True)
+
+    n_favs = len(st.session_state.liked_books)
+    if st.session_state.recs_mode == "top_rated" or n_favs == 0:
+        st.markdown(
+            '<div class="section-label">Showing top-rated picks · save books on the Favorites page to get personalized recommendations</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        noun = "favorite" if n_favs == 1 else "favorites"
+        st.markdown(
+            f'<div class="section-label">Based on your {n_favs} {noun} · newer favorites weigh more</div>',
             unsafe_allow_html=True,
         )
 
     for _, row in st.session_state.recs.iterrows():
-        book_card(row, source="rec")
+        book_card(row, source="recs")
 
 
 # ─── open the detail modal only when explicitly triggered ──────────────────
