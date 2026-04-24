@@ -4,6 +4,7 @@ numpy
 pyarrow
 torch
 sentence-transformers
+einops
 tqdm
 anthropic
 python-dotenv
