@@ -44,7 +44,7 @@ def _load_artifacts():
 
 def _get_model():
     """Load embedding model."""
-    return SentenceTransformer(MODEL_NAME)
+    return SentenceTransformer(MODEL_NAME, trust_remote_code=True)
 
 
 def _encode_query(model, query):
