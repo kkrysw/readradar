@@ -116,7 +116,9 @@ def build_search_artifacts():
             "books.parquet or have empty search_text."
         )
 
-    model = SentenceTransformer(MODEL_NAME, device="cpu")
+    # `trust_remote_code=True` is required by Nomic v1.5 so sentence-transformers
+    # loads its custom pooling/normalization head. Must match `src/search.py`.
+    model = SentenceTransformer(MODEL_NAME, device="cpu", trust_remote_code=True)
     embeddings = _encode_documents(model, books_df["search_text"].tolist())
 
     if embeddings.shape[0] != len(books_df):

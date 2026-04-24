@@ -9,20 +9,25 @@ pip install -r requirements.txt
 streamlit run app/app.py
 ```
 
-The app has three pages:
+The app has four pages:
 
 1. **Thematic Search** — semantic search over the 5,000 sampled books. Each result card shows cover, rating, relevance score, top controversy tags, and a description preview. Clicking *Details* opens a detail modal with metadata, the controversy summary (`top_tags` + `overall_judgment`), and the full description. *+ Favorite* adds the book to the saved list.
 2. **Favorites** — every saved book shown as a first-class card in insertion order (oldest → newest). Each card has the same *Details* modal access as search results and a *Remove* action for removing the book from favorites. This is the only page where favorites are managed.
 3. **Recommendations** — top-N recommendations computed from the favorites list. Newer favorites weigh more (recency-weighted persona, see below). With no favorites yet, the page shows top-rated picks as a starting point.
+4. **Reading Neighborhoods** — semantic clusters of the catalog. A drop-down lists 24 neighborhoods with human-readable labels built from cleaned Goodreads shelves; picking one shows its most central books as cards with the same *Details* modal access.
 
-## Core algorithm (explicitly implemented)
+## Core algorithms (explicitly implemented)
 
-Cosine-similarity nearest-neighbor retrieval is the main algorithm of the project. It is implemented in pure NumPy, not wrapped by a library abstraction, in two places:
+Two course-covered algorithms are implemented from scratch — not wrapped via `sklearn` or equivalent:
 
-- `src/search.py::_cosine_top_k` — query vector vs. every book vector.
-- `src/recommend.py::_cosine_scores` — recency-weighted persona vector vs. every book vector.
+1. **Cosine-similarity nearest-neighbor retrieval** (NumPy).
+   - `src/search.py::_cosine_top_k` — query vector vs. every book vector.
+   - `src/recommend.py::_cosine_scores` — recency-weighted persona vector vs. every book vector.
+   - Book embeddings are L2-normalized at build time so cosine similarity reduces to a single matrix-vector dot product; top-k uses `np.argpartition`.
 
-Book embeddings are L2-normalized at build time so cosine similarity reduces to a single matrix-vector dot product, with a manual top-k via `np.argpartition`.
+2. **Spherical k-means++ clustering** (NumPy).
+   - `src/clustering.py::spherical_kmeans` with `kmeans_plus_plus_init`, cosine-similarity assignment, centroid update with L2 re-normalization, and robust empty-cluster recovery.
+   - Used to build 24 semantic "Reading Neighborhoods" over the search embeddings. Goodreads `popular_shelves` are used *only after clustering* to generate human-readable neighborhood labels.
 
 ## Official pipeline
 
@@ -57,7 +62,10 @@ python scripts/build_rec_embeddings.py
 # 6. UI master cache (metadata + controversy merged for the Streamlit app)
 python scripts/build_ui_cache.py
 
-# 7. Launch the app
+# 7. Reading Neighborhoods — spherical k-means++ clusters over search embeddings
+python scripts/build_book_clusters.py
+
+# 8. Launch the app
 streamlit run app/app.py
 ```
 
@@ -102,6 +110,7 @@ Consumed by the app:
 | `data/artifacts/ui_books_cache.parquet` | Display metadata + `top_tags` + `overall_judgment` |
 | `data/artifacts/search_books.parquet` + `search_embeddings.npy` | Semantic search |
 | `data/artifacts/rec_embeddings.npy` + `rec_embeddings_ids.json` | Favorites-based recommendations |
+| `data/artifacts/book_clusters.parquet` + `book_cluster_summary.json` | Reading Neighborhoods |
 | `data/processed/books.parquet` | Canonical metadata for the recommendation metadata merge |
 
 Produced by the pipeline but not read directly by the app (kept for auditability):
@@ -122,11 +131,13 @@ src/
   controversy_finalize.py   clean final controversy artifact
   search.py                 semantic search (pure NumPy cosine top-k)
   recommend.py              favorites-based recommendation (pure NumPy cosine)
+  clustering.py             spherical k-means++ (pure NumPy)
 
 scripts/
   build_features.py         search embeddings
   build_rec_embeddings.py   recommendation embeddings
   build_ui_cache.py         UI master table
+  build_book_clusters.py    Reading Neighborhoods artifact
 
 app/
   app.py                    Streamlit app
@@ -185,6 +196,16 @@ Each backend module has a concrete objective. This section documents what the mo
   - `overall_judgment` reflects the dominant sentiment instead of forcing a balanced both-sides framing,
   - for books with sparse reviews, the model falls back to the conservative catch-all sentence rather than fabricating specifics.
   We additionally used stronger judge LLMs to cross-check a random sample of outputs against the underlying reviews for fidelity and hallucination.
+
+### Reading Neighborhoods — spherical k-means++ clustering
+- **Objective.** Group the 5,000 sampled books into ~24 semantic neighborhoods so users can browse the catalog by theme. Cluster labels must be readable without the noise of raw Goodreads shelves.
+- **Algorithm.**
+  - L2-normalize the search embeddings (they already are, but the function is applied defensively).
+  - **k-means++ initialization** adapted to cosine distance: first centroid uniformly at random, each next centroid sampled with probability proportional to `(1 - max_cosine_sim_to_existing_centroids)^2`. If that distribution collapses, fall back to uniform over unchosen points.
+  - **Lloyd iterations**: assign each book to its most similar centroid by cosine; recompute centroids as the mean of assigned vectors; L2-normalize back to the unit sphere. Any cluster that ends up empty is reinitialized to the point currently farthest from its own centroid. Stop when assignments stop changing, centroid shift falls below `tol`, or `max_iter` is hit.
+  - **Labels from cleaned shelves** (only after clustering). `popular_shelves` strings are split and filtered through a deterministic pipeline: drop year/rating tags, utility shelves (`to-read`, `owned`, `dnf`, audiobook-formats, library shelves), too-short or non-ASCII-alphabetic tokens, and a small author/series blocklist; normalize near-duplicate variants (`sci-fi` → `science-fiction`, `graphic-novel`/`comics` → `graphic-novels`, `religious` → `religion`, `historical` → `historical-fiction`, …). Shelves are then counted with representative-weighted frequencies — cluster-central books contribute more (rank 1–10 × 3, rank 11–50 × 1.5, rest × 1) — and broad tags (`fiction`, `classic`, `adult`, …) are downweighted so specific shelves surface first. Each cluster is named by its top three shelves joined with ` · `.
+  - **Representative books**: within each cluster, rank members by descending centroid similarity; top 5 marked `is_representative = True`.
+- **How we verify.** `scripts/build_book_clusters.py` asserts 5,000 output rows, no duplicate `book_id`, no empty clusters, no NaN centroid similarities, that cluster sizes sum to 5,000, and — after the global uniqueness pass — no two clusters share the same label string or same token set in a different order. We additionally read the cluster summary JSON and spot-check labels and representative titles: *Vampires & Paranormal · Young Adult · Mystery & Thriller* reps include *Dracula* and the *Vampire Kisses* series; *Religion & Spirituality · Christian · Memoir & Biography* reps include *The Pilgrim's Progress* and *Searching for God Knows What*; *Mystery & Thriller · Crime & Detective · British Literature* reps are dominated by Hercule Poirot titles. The algorithm converges in under 30 iterations with a final cosine-distance inertia that is stable across reruns (same seed).
 
 ### Final UI cache
 - **Objective.** Assemble the single parquet the app loads for every search card, recommendation card, and detail modal.

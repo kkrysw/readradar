@@ -57,13 +57,15 @@ UI_CACHE_PATH       = ARTIFACTS_DIR / "ui_books_cache.parquet"
 REC_EMBEDDINGS_PATH = ARTIFACTS_DIR / "rec_embeddings.npy"
 REC_IDS_PATH        = ARTIFACTS_DIR / "rec_embeddings_ids.json"
 BOOKS_PATH          = PROCESSED_DIR / "books.parquet"
+CLUSTERS_PATH       = ARTIFACTS_DIR / "book_clusters.parquet"  # optional
 
 REQUIRED_PATHS = [UI_CACHE_PATH, REC_EMBEDDINGS_PATH, REC_IDS_PATH, BOOKS_PATH]
 
 TABS = {
-    "search":    "🔍 Thematic Search",
-    "favorites": "📖 Favorites",
-    "recs":      "✨ Recommendations",
+    "search":        "🔍 Thematic Search",
+    "favorites":     "📖 Favorites",
+    "recs":          "✨ Recommendations",
+    "neighborhoods": "🗺️ Reading Neighborhoods",
 }
 
 DETAIL_COLUMNS = [
@@ -120,6 +122,19 @@ def safe_load():
     if not all(p.exists() for p in REQUIRED_PATHS):
         return None, None, None, None
     return load_data()
+
+
+@st.cache_data(show_spinner=False)
+def load_clusters() -> pd.DataFrame | None:
+    """
+    Load the Reading Neighborhoods artifact. Optional — returns None if the
+    file does not exist so the page can show a friendly instruction.
+    """
+    if not CLUSTERS_PATH.exists():
+        return None
+    df = pd.read_parquet(CLUSTERS_PATH)
+    df["book_id"] = df["book_id"].astype(str)
+    return df
 
 
 # ─── small helpers ─────────────────────────────────────────────────────────
@@ -315,6 +330,10 @@ def book_card(row: pd.Series, source: str) -> None:
         order = row.get("_fav_order")
         if order is not None and not (isinstance(order, float) and pd.isna(order)):
             metric_html = f'<span class="bc-score">#{int(order)}</span>'
+    elif source == "neighborhoods":
+        sim = row.get("centroid_similarity")
+        if sim is not None and not (isinstance(sim, float) and pd.isna(sim)):
+            metric_html = f'<span class="bc-score">Centrality · {float(sim):.0%}</span>'
 
     desc = str(row.get("description", "") or "").strip()
     desc_preview = desc[:240] + "…" if len(desc) > 240 else desc
@@ -401,6 +420,8 @@ def show_modal(book_id: str) -> None:
         results = st.session_state.recs
     elif modal_source == "favorites":
         results = st.session_state.get("favorites_df")
+    elif modal_source == "neighborhoods":
+        results = st.session_state.get("neighborhood_df")
     else:
         results = st.session_state.thematic_results
     if results is None or results.empty:
@@ -432,6 +453,8 @@ def show_modal(book_id: str) -> None:
         metric_label = "Match"
     elif modal_source == "favorites":
         metric_label = ""  # no score on favorites
+    elif modal_source == "neighborhoods":
+        metric_label = ""  # cluster similarity is shown on the page, not the modal
     else:
         metric_label = "Relevance"
 
@@ -540,6 +563,8 @@ def init_session_state() -> None:
         "favorites_df":       None,
         "recs":               pd.DataFrame(),
         "recs_mode":          "top_rated",
+        "selected_cluster":   None,
+        "neighborhood_df":    None,  # enriched rows for the selected cluster
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -743,6 +768,109 @@ elif st.session_state.active_tab == "recs":
 
     for _, row in st.session_state.recs.iterrows():
         book_card(row, source="recs")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PAGE 4 — READING NEIGHBORHOODS (semantic clusters)
+# ═══════════════════════════════════════════════════════════════════════════
+elif st.session_state.active_tab == "neighborhoods":
+    st.markdown('<div class="section-title">Reading Neighborhoods</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-label">'
+        'Books grouped into semantic neighborhoods using spherical k-means over '
+        'the normalized search embeddings. Pick a neighborhood to explore its books.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    clusters_df = load_clusters()
+    if clusters_df is None:
+        st.info(
+            "Neighborhoods not built yet. Run:\n\n"
+            "```\npython scripts/build_book_clusters.py\n```"
+        )
+    else:
+        # One row per cluster with a display label.
+        clusters_summary = (
+            clusters_df.drop_duplicates("cluster_id")[
+                ["cluster_id", "cluster_label", "cluster_size"]
+            ]
+            .sort_values("cluster_id")
+            .reset_index(drop=True)
+        )
+        cluster_options = [
+            (int(row["cluster_id"]), str(row["cluster_label"]), int(row["cluster_size"]))
+            for _, row in clusters_summary.iterrows()
+        ]
+
+        def _fmt_cluster(opt):
+            cid, label, size = opt
+            return f"{label}  ·  {size} books"
+
+        default_idx = 0
+        if st.session_state.selected_cluster is not None:
+            for i, (cid, _, _) in enumerate(cluster_options):
+                if cid == st.session_state.selected_cluster:
+                    default_idx = i
+                    break
+
+        picked = st.selectbox(
+            "Choose a neighborhood",
+            options=cluster_options,
+            index=default_idx,
+            format_func=_fmt_cluster,
+            key="neighborhood_picker",
+        )
+        picked_cluster_id = int(picked[0])
+
+        # Changing the cluster selection closes any stale modal.
+        if st.session_state.selected_cluster != picked_cluster_id:
+            st.session_state.selected_cluster = picked_cluster_id
+            clear_modal()
+
+        # Enrich the cluster members once and cache on session state so the
+        # modal lookup can read the exact same rows.
+        member_slice = clusters_df[clusters_df["cluster_id"] == picked_cluster_id].copy()
+        member_slice = member_slice.sort_values("cluster_rank").reset_index(drop=True)
+        neighborhood_df = enrich_with_details(
+            member_slice[["book_id", "cluster_rank", "centroid_similarity", "is_representative"]],
+            books,
+        )
+        st.session_state.neighborhood_df = neighborhood_df
+
+        # Browsing depth selector. Numeric options are mapped to the `cluster_rank`
+        # filter; "All" shows every book in the neighborhood in rank order.
+        # `on_change=clear_modal` prevents a previously-opened details dialog
+        # (dismissed via the browser X) from re-appearing when the user flips
+        # between Top 10 / 25 / 50 / All.
+        show_options = [("Top 10", 10), ("Top 25", 25), ("Top 50", 50), ("All", None)]
+        picked_show = st.radio(
+            "Show",
+            options=show_options,
+            index=0,
+            horizontal=True,
+            format_func=lambda opt: opt[0],
+            key=f"neighborhood_show_{picked_cluster_id}",
+            on_change=clear_modal,
+        )
+        show_limit = picked_show[1]
+
+        total = len(neighborhood_df)
+        if show_limit is None:
+            displayed_df = neighborhood_df
+            caption = f"All {total} books in this neighborhood"
+        else:
+            shown = min(show_limit, total)
+            displayed_df = neighborhood_df.head(show_limit)
+            caption = f"Top {shown} most central to this neighborhood"
+
+        st.markdown(
+            f'<div class="section-label">{total} books · {caption}</div>',
+            unsafe_allow_html=True,
+        )
+
+        for _, row in displayed_df.iterrows():
+            book_card(row, source="neighborhoods")
 
 
 # ─── open the detail modal only when explicitly triggered ──────────────────
