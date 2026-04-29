@@ -1,18 +1,29 @@
 """
 ReadRadar — Streamlit app.
 
-Two pages:
+Four pages:
     1. Thematic Search — semantic search over the 5,000 sampled books.
-       Each result card can be opened for details (controversy tags +
-       judgment + metadata) and added to favorites.
-    2. Recommendations — favorites list + recency-weighted recommendations.
+       Each result card can be opened for details and added to favorites.
 
-Artifacts consumed (produced by the backend pipeline):
-    data/artifacts/ui_books_cache.parquet     (metadata + top_tags + judgment)
+    2. Favorites — saved books in insertion order, oldest to newest.
+       This page manages favorite removal and gives direct access to details.
+
+    3. Recommendations — recency-weighted recommendations from the current
+       favorites list. If no favorites exist, the page shows top-rated starter
+       picks.
+
+    4. Reading Neighborhoods — spherical k-means++ clusters over the normalized
+       search embeddings. Users can browse the most central books in each
+       semantic neighborhood.
+
+Artifacts consumed:
+    data/artifacts/ui_books_cache.parquet
+    data/artifacts/search_books.parquet
+    data/artifacts/search_embeddings.npy
     data/artifacts/rec_embeddings.npy
     data/artifacts/rec_embeddings_ids.json
-    data/artifacts/search_books.parquet       (via src.search)
-    data/artifacts/search_embeddings.npy      (via src.search)
+    data/artifacts/book_clusters.parquet
+    data/processed/books.parquet
 """
 
 from __future__ import annotations
@@ -54,12 +65,21 @@ ARTIFACTS_DIR = DATA_DIR / "artifacts"
 PROCESSED_DIR = DATA_DIR / "processed"
 
 UI_CACHE_PATH       = ARTIFACTS_DIR / "ui_books_cache.parquet"
+SEARCH_BOOKS_PATH = ARTIFACTS_DIR / "search_books.parquet"
+SEARCH_EMBEDDINGS_PATH = ARTIFACTS_DIR / "search_embeddings.npy"
 REC_EMBEDDINGS_PATH = ARTIFACTS_DIR / "rec_embeddings.npy"
 REC_IDS_PATH        = ARTIFACTS_DIR / "rec_embeddings_ids.json"
 BOOKS_PATH          = PROCESSED_DIR / "books.parquet"
 CLUSTERS_PATH       = ARTIFACTS_DIR / "book_clusters.parquet"  # optional
 
-REQUIRED_PATHS = [UI_CACHE_PATH, REC_EMBEDDINGS_PATH, REC_IDS_PATH, BOOKS_PATH]
+REQUIRED_PATHS = [
+    UI_CACHE_PATH,
+    SEARCH_BOOKS_PATH,
+    SEARCH_EMBEDDINGS_PATH,
+    REC_EMBEDDINGS_PATH,
+    REC_IDS_PATH,
+    BOOKS_PATH,
+]
 
 TABS = {
     "search":        "🔍 Thematic Search",
@@ -587,9 +607,12 @@ st.markdown(
 books, rec_embeddings, rec_book_ids, rec_books_df = safe_load()
 
 if books is None:
+    missing = [str(p) for p in REQUIRED_PATHS if not p.exists()]
     st.error(
-        "**Artifacts not found.** Generate the search, recommendation, and UI "
-        "cache artifacts first. See the README for the official pipeline commands."
+        "**Required artifacts not found.** Generate the official pipeline artifacts "
+        "first, then relaunch the app. Missing:\n\n"
+        + "\n".join(f"- `{p}`" for p in missing)
+        + "\n\nSee the README for the official pipeline commands."
     )
     st.stop()
 

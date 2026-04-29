@@ -35,11 +35,6 @@ def to_book_id_set(frame: pd.DataFrame) -> set[str]:
     return set(frame["book_id"].dropna().astype(str))
 
 
-def unique_book_count(frame: pd.DataFrame) -> int:
-    """Count unique non-null book IDs as strings."""
-    return int(frame["book_id"].dropna().astype(str).nunique())
-
-
 def build_sample(
     books: pd.DataFrame,
     interactions: pd.DataFrame,

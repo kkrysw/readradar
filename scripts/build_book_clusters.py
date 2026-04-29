@@ -501,7 +501,6 @@ def build_cluster_label(
 
 def resolve_duplicate_labels(
     initial: dict[int, dict],
-    max_labels: int = 3,
 ) -> dict[int, dict]:
     """
     Global uniqueness pass.

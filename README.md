@@ -18,8 +18,6 @@ The app has four pages:
 
 ## Core algorithms (explicitly implemented)
 
-Two course-covered algorithms are implemented from scratch — not wrapped via `sklearn` or equivalent:
-
 1. **Cosine-similarity nearest-neighbor retrieval** (NumPy).
    - `src/search.py::_cosine_top_k` — query vector vs. every book vector.
    - `src/recommend.py::_cosine_scores` — recency-weighted persona vector vs. every book vector.
@@ -28,6 +26,8 @@ Two course-covered algorithms are implemented from scratch — not wrapped via `
 2. **Spherical k-means++ clustering** (NumPy).
    - `src/clustering.py::spherical_kmeans` with `kmeans_plus_plus_init`, cosine-similarity assignment, centroid update with L2 re-normalization, and robust empty-cluster recovery.
    - Used to build 24 semantic "Reading Neighborhoods" over the search embeddings. Goodreads `popular_shelves` are used *only after clustering* to generate human-readable neighborhood labels.
+
+If the precomputed artifacts are present in `data/artifacts/` and `data/processed/`, the app can be launched directly. To regenerate them from raw data, run the official pipeline below.
 
 ## Official pipeline
 
@@ -56,14 +56,14 @@ python src/controversy_finalize.py
 # 4. Search artifacts (Nomic v1.5, 384D, L2-normalized)
 python scripts/build_features.py
 
-# 5. Recommendation artifacts (MiniLM-L6-v2, 384D, L2-normalized)
+# 5. Reading Neighborhoods — spherical k-means++ clusters over search embeddings
+python scripts/build_book_clusters.py
+
+# 6. Recommendation artifacts (MiniLM-L6-v2, 384D, L2-normalized)
 python scripts/build_rec_embeddings.py
 
-# 6. UI master cache (metadata + controversy merged for the Streamlit app)
+# 7. UI master cache (metadata + controversy merged for the Streamlit app)
 python scripts/build_ui_cache.py
-
-# 7. Reading Neighborhoods — spherical k-means++ clusters over search embeddings
-python scripts/build_book_clusters.py
 
 # 8. Launch the app
 streamlit run app/app.py
@@ -195,7 +195,6 @@ Each backend module has a concrete objective. This section documents what the mo
   - each tag is supported by recurring themes in the reviews,
   - `overall_judgment` reflects the dominant sentiment instead of forcing a balanced both-sides framing,
   - for books with sparse reviews, the model falls back to the conservative catch-all sentence rather than fabricating specifics.
-  We additionally used stronger judge LLMs to cross-check a random sample of outputs against the underlying reviews for fidelity and hallucination.
 
 ### Reading Neighborhoods — spherical k-means++ clustering
 - **Objective.** Group the 5,000 sampled books into ~24 semantic neighborhoods so users can browse the catalog by theme. Cluster labels must be readable without the noise of raw Goodreads shelves.
@@ -203,10 +202,35 @@ Each backend module has a concrete objective. This section documents what the mo
   - L2-normalize the search embeddings (they already are, but the function is applied defensively).
   - **k-means++ initialization** adapted to cosine distance: first centroid uniformly at random, each next centroid sampled with probability proportional to `(1 - max_cosine_sim_to_existing_centroids)^2`. If that distribution collapses, fall back to uniform over unchosen points.
   - **Lloyd iterations**: assign each book to its most similar centroid by cosine; recompute centroids as the mean of assigned vectors; L2-normalize back to the unit sphere. Any cluster that ends up empty is reinitialized to the point currently farthest from its own centroid. Stop when assignments stop changing, centroid shift falls below `tol`, or `max_iter` is hit.
-  - **Labels from cleaned shelves** (only after clustering). `popular_shelves` strings are split and filtered through a deterministic pipeline: drop year/rating tags, utility shelves (`to-read`, `owned`, `dnf`, audiobook-formats, library shelves), too-short or non-ASCII-alphabetic tokens, and a small author/series blocklist; normalize near-duplicate variants (`sci-fi` → `science-fiction`, `graphic-novel`/`comics` → `graphic-novels`, `religious` → `religion`, `historical` → `historical-fiction`, …). Shelves are then counted with representative-weighted frequencies — cluster-central books contribute more (rank 1–10 × 3, rank 11–50 × 1.5, rest × 1) — and broad tags (`fiction`, `classic`, `adult`, …) are downweighted so specific shelves surface first. Each cluster is named by its top three shelves joined with ` · `.
+  - **Labels from cleaned shelves** (only after clustering). `popular_shelves` strings are split and filtered through a deterministic pipeline: drop year/rating tags, utility shelves (`to-read`, `owned`, `dnf`, audiobook-formats, library shelves), too-short or non-ASCII-alphabetic tokens, and a small author/series blocklist; normalize near-duplicate variants (`sci-fi` → `science-fiction`, `graphic-novel`/`comics` → `graphic-novels`, `religious` → `religion`, `historical` → `historical-fiction`, …). Shelves are then counted with representative-weighted frequencies — cluster-central books contribute more (rank 1–10 × 3, rank 11–50 × 1.5, rest × 1) — and broad tags (`fiction`, `classics`, `adult`, …) are downweighted so specific shelves surface first. Each cluster is named by up to three display label families joined with ` · `.
   - **Representative books**: within each cluster, rank members by descending centroid similarity; top 5 marked `is_representative = True`.
-- **How we verify.** `scripts/build_book_clusters.py` asserts 5,000 output rows, no duplicate `book_id`, no empty clusters, no NaN centroid similarities, that cluster sizes sum to 5,000, and — after the global uniqueness pass — no two clusters share the same label string or same token set in a different order. We additionally read the cluster summary JSON and spot-check labels and representative titles: *Vampires & Paranormal · Young Adult · Mystery & Thriller* reps include *Dracula* and the *Vampire Kisses* series; *Religion & Spirituality · Christian · Memoir & Biography* reps include *The Pilgrim's Progress* and *Searching for God Knows What*; *Mystery & Thriller · Crime & Detective · British Literature* reps are dominated by Hercule Poirot titles. The algorithm converges in under 30 iterations with a final cosine-distance inertia that is stable across reruns (same seed).
+- **How we verify.** `scripts/build_book_clusters.py` asserts 5,000 output rows, no duplicate `book_id`, no empty clusters, no NaN centroid similarities, that cluster sizes sum to 5,000, and — after the global uniqueness pass — no two clusters share the same label string or same token set in a different order. We additionally read the cluster summary JSON and spot-check labels and representative titles: *Vampires & Paranormal · Young Adult · Mystery & Thriller* reps include *Dracula* and the *Vampire Kisses* series; *Religion & Spirituality · Christian · Memoir & Biography* reps include *The Pilgrim's Progress* and *Searching for God Knows What*; *Mystery & Thriller · Crime & Detective · British Literature* reps are dominated by Hercule Poirot titles. The algorithm converges in under 30 iterations with a final cosine-distance inertia that is stable across reruns (same seed). These labels are interpretive aids, not official genre labels; the actual clusters come from embeddings.
 
 ### Final UI cache
 - **Objective.** Assemble the single parquet the app loads for every search card, recommendation card, and detail modal.
 - **How we verify.** `build_ui_cache.py` inner-joins the final controversy artifact with the processed metadata on `book_id`, normalizes `top_tags` into a Python list, asserts exactly 5,000 rows, and fails loudly if any sampled book lacks metadata. The app only reads this table plus the pre-built search/recommendation artifacts; no live LLM call happens at runtime.
+
+## Design choices and tradeoffs
+
+Several project parameters are intentionally simple, interpretable operating points rather than learned hyperparameters. Because the app does not have ground-truth labels for “best search result,” “best cluster,” or “best recommendation,” we prioritized choices that are explainable, reproducible, and easy to validate qualitatively in the demo.
+
+- **Why a 5,000-book catalog?**  
+  The full Goodreads graph is too large for a lightweight demo app, while a tiny sample would make search and recommendations feel artificial. A 5,000-book catalog is large enough for meaningful retrieval and clustering, but small enough to precompute embeddings, LLM summaries, and clustering artifacts reliably. All downstream modules validate against the same 5,000 `book_id`s.
+
+- **Why cosine similarity and L2 normalization?**  
+  Sentence embeddings are normally compared by direction rather than magnitude. After L2 normalization, cosine similarity becomes a simple dot product, which lets us implement search, recommendation scoring, and spherical k-means assignment directly in NumPy.
+
+- **Why Nomic for search but MiniLM for recommendations?**  
+  Search is an asymmetric query-to-document retrieval problem, so Nomic’s `search_query:` / `search_document:` prefixes are useful. Recommendations are profile-to-book matching: favorite book vectors are averaged into a user persona, so a compact symmetric embedding model like MiniLM is sufficient and easy to use. The two embedding spaces are never mixed.
+
+- **Why truncate Nomic embeddings from 768D to 384D?**  
+  Nomic v1.5 is Matryoshka-trained, meaning earlier dimensions are designed to remain useful when truncated. We apply the same layer-normalize → truncate → L2-normalize pipeline to both documents and queries. This halves storage and dot-product cost while preserving enough quality for the 5,000-book search setting.
+
+- **Why recency-weighted recommendations?**  
+  Favorites are ordered user feedback. Newer favorites often better reflect the user’s current taste, so the persona vector weights newer favorites more heavily while still retaining older favorites. The weighting rule is deterministic, normalized to sum to 1, and easy to explain.
+
+- **Why 24 reading neighborhoods?**  
+  The number of clusters is a browsing-granularity choice, not a claim that there are exactly 24 genres. With 5,000 books, 24 clusters gives roughly a few hundred books per neighborhood, which is large enough to be meaningful but small enough to browse. The final clusters are non-degenerate and exposed through representative books.
+
+- **Why sample 12 reviews per book for controversy summaries?**  
+  LLM context and API cost make using all reviews impractical. Twelve reviews gives a bounded evidence bundle for every book. When available, the sample is balanced across negative, neutral, and positive rating buckets so the model can see disagreement, while the prompt explicitly tells it not to force artificial balance.
