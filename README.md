@@ -1,6 +1,6 @@
 # ReadRadar
 
-A book discovery Streamlit app built on the UCSD Book Graph (Goodreads snapshot, 2017). Users can search a 5,000-book catalog by theme, read LLM-generated controversy tags and an overall reader judgment for any book, add books to a favorites list, and receive recency-weighted recommendations.
+A book discovery Streamlit app built on the [UCSD Book Graph](https://cseweb.ucsd.edu/~jmcauley/datasets/goodreads.html) (Goodreads snapshot, 2017). Users can search a 5,000-book catalog by theme, read LLM-generated controversy tags and an overall reader judgment for any book, add books to a favorites list, and receive recency-weighted recommendations.
 
 ## Final app
 
