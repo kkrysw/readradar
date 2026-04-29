@@ -24,7 +24,6 @@ Public entry point: `spherical_kmeans`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 
@@ -134,7 +133,6 @@ def update_centroids(
     x: np.ndarray,
     labels: np.ndarray,
     k: int,
-    previous_centroids: np.ndarray,
     max_sim_to_previous: np.ndarray,
     rng: np.random.Generator,
 ) -> np.ndarray:
@@ -234,7 +232,7 @@ def spherical_kmeans(
     for it in range(1, max_iter + 1):
         iterations_run = it
         new_centroids = update_centroids(
-            x_norm, labels, k, centroids, max_sim, rng
+            x_norm, labels, k, max_sim, rng
         )
         # Centroid shift under cosine similarity.
         centroid_shift = float(np.max(1.0 - np.sum(new_centroids * centroids, axis=1)))

@@ -116,37 +116,6 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
-def detect_language_hybrid(lang_code: str, text: str) -> bool:
-    """
-    Return True if the record is likely English.
-
-    Strategy (hybrid):
-      1. Trust explicit language_code when non-empty.
-         GoodReads uses 'eng', 'en', 'en-US', etc.
-      2. Fall back to langid (or langdetect) on review text when absent.
-         Reviews shorter than 20 chars are dropped (too noisy to detect).
-    """
-    if lang_code and lang_code.strip():
-        code = lang_code.strip().lower()
-        return code.startswith("en") or code == "eng"
-
-    if not text or len(text.strip()) < 20:
-        return False
-
-    if _langid_classify is not None:
-        try:
-            lang, _ = _langid_classify(text)
-            return lang == "en"
-        except Exception:
-            return False
-
-    try:
-        from langdetect import detect  # type: ignore
-        return detect(text) == "en"
-    except Exception:
-        return False
-
-
 def _safe_int(val, default=0) -> int:
     try:
         return int(val)
