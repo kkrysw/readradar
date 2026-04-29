@@ -149,7 +149,7 @@ notebooks/
 
 ## Data sources
 
-UCSD Book Graph (Goodreads snapshot, 2017) — Wan et al., 2018.
+[UCSD Book Graph](https://cseweb.ucsd.edu/~jmcauley/datasets/goodreads.html) (Goodreads snapshot, 2017) — Wan et al., 2018.
 
 ## Evaluation
 
